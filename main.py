@@ -1,6 +1,5 @@
 from init.ann_index import AnnIndex
 from typing import List, Dict, Any
-from collections import defaultdict
 from dataclasses import dataclass
 from PyQt5 import QtWidgets
 from PyQt5.QtWidgets import QApplication
@@ -1016,8 +1015,6 @@ class FaceRecognitionSystem:
                 self.state.features_dict = f
                 self._update_profile_pictures()
                 self._load_or_build_index(force_rebuild=True)
-            threading.Thread(
-                target=self._update_descriptor_counts_on_server, daemon=True).start()
         finally:
             self.update_lock.release()
 
@@ -1194,36 +1191,6 @@ class FaceRecognitionSystem:
 
         # 重建索引
         self.state.ann_index.build(self.state.features_dict)
-
-    def _get_valid_staff_ids(self):
-        try:
-            r = requests.get(
-                f"{CONFIG['Server']['API_url']}/staffs/", timeout=10)
-            r.raise_for_status()
-            return {i["staff_id"] for i in r.json()}
-        except Exception:
-            return None
-
-    def _update_descriptor_counts_on_server(self):
-        vids = self._get_valid_staff_ids()
-        if vids is None:
-            return
-        dp = os.path.join(self.local_media_path, "descriptors")
-        if not os.path.isdir(dp):
-            return
-        cnts = defaultdict(int)
-        for f in os.listdir(dp):
-            if f.lower().endswith('.npy'):
-                try:
-                    cnts[f.split('_')[0]] += 1
-                except Exception:
-                    continue
-        for sid in vids:
-            try:
-                requests.patch(f"{CONFIG['Server']['API_url']}/staffs/{sid}/",
-                               json={"descriptors": cnts.get(sid, 0)}, timeout=5)
-            except Exception:
-                pass
 
     def setup_cameras(self):
         ips = [CONFIG["cameraIP"]["in_camera"],
