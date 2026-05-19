@@ -137,7 +137,7 @@ class ConfigWindow(QWidget):
         group_feat, form_feat = self.create_form_group("功能開關")
         self.chk_clothes = QCheckBox("啟用服裝/安全帽偵測 (Clothes Detection)")
         self.chk_clothes_show = QCheckBox("顯示服裝偵測框 (Show Clothes Box)")
-        self.chk_long_distance = QCheckBox("啟用長距離辨識 (Long Distance Two-Pass)")
+        self.chk_long_distance = QCheckBox("啟用遠距服裝辨識 (Clothes Zoom Mode)")
         self.chk_qrcode = QCheckBox(
             "啟用 QR Code 掃描 (QR Code Mode)")  # [2026-02-04 Feature]
         self.chk_full_screen = QCheckBox("全螢幕模式 (Full Screen)")

@@ -17,6 +17,7 @@ from PIL import Image
 from init.function import crop_face_without_forehead, check_in_out_qrcode, check_in_out
 from init.mediapipe_handler import MediaPipeHandler
 
+
 @nb.jit
 def cosine_similarity(vec1, vec2):
     """
@@ -66,15 +67,17 @@ class Detector:
         self.last_face_time = 0
         self.last_no_face_log_time = 0
         self.clothe_time = [0.0, 0.0, 0.0]
+        # Vest at distance is more prone to intermittent YOLO misses than helmet.
+        # Hold recent valid detections briefly so a standing user does not flicker out.
+        self.clothe_hold_seconds = [2.5, 0.0, 1.5]
         # 初始化 MediaPipe 處理器
         self.mp_handler = MediaPipeHandler()
-        self.mp_handler_zoom = MediaPipeHandler() # [Two-Pass] 專用獨立追蹤器
 
         # [2026-02-04 Feature] QR Code Detector
         self.qr_detector = cv2.QRCodeDetector()
         self.last_qr_time = 0
         self.last_qr_data = ""
-        self.qr_scan_interval = 1.0 # 1 FPS limit
+        self.qr_scan_interval = 1.0  # 1 FPS limit
         self.last_qr_scan_time = 0
 
         # [2026-02-03 Fix] 初始化衣著偵測旗標
@@ -82,11 +85,16 @@ class Detector:
         # [2026-02-06 Fix] 若開啟 "Detection" (攔截)，即使 "Show" (顯示框) 關閉，也必須執行偵測，否則會因狀態全 False 而永久攔截
         clothes_show = CONFIG.get("Clothes_show", False)
         clothes_det = CONFIG.get("Clothes_detection", False)
-        self.do_clothes = (self.frame_num == 0 and (clothes_show or clothes_det))
+        self.do_clothes = (self.frame_num == 0 and (
+            clothes_show or clothes_det))
 
-        LOGGER.info(f"[Detector Init] Frame: {self.frame_num}, Clothes_Show: {clothes_show}, Clothes_Det: {clothes_det} -> Do_Clothes: {self.do_clothes}")
+        LOGGER.info(
+            f"[Detector Init] Frame: {self.frame_num}, Clothes_Show: {clothes_show}, Clothes_Det: {clothes_det} -> Do_Clothes: {self.do_clothes}")
 
         threading.Thread(target=self.face_detector, daemon=True).start()
+
+    def _clothes_gate_required(self):
+        return self.do_clothes and (CONFIG.get("Clothes_detection", False) or CONFIG.get("Clothes_show", False))
 
     def _is_entry_active(self):
         """
@@ -94,7 +102,8 @@ class Detector:
         解決單鏡頭模式下，出口時段誤執行衣著偵測與阻斷的問題。
         """
         # 1. 判斷是否為單鏡頭
-        ips = [CONFIG["cameraIP"]["in_camera"], CONFIG["cameraIP"]["out_camera"]]
+        ips = [CONFIG["cameraIP"]["in_camera"],
+               CONFIG["cameraIP"]["out_camera"]]
         is_single_cam = (ips[0] == ips[1])
 
         # 雙鏡頭模式：看 frame_num
@@ -104,7 +113,7 @@ class Detector:
         # 單鏡頭模式：看排程
         schedule_conf = CONFIG.get("Schedule", {})
         if not schedule_conf.get("enabled", False):
-            return True # 無排程預設為入口 (從嚴)
+            return True  # 無排程預設為入口 (從嚴)
 
         try:
             now_time = datetime.now().time()
@@ -115,12 +124,16 @@ class Detector:
                 periods = [{"start": start_str, "end": end_str}]
 
             for period in periods:
-                start_time = datetime.strptime(period.get("start", "00:00"), "%H:%M").time()
-                end_time = datetime.strptime(period.get("end", "00:00"), "%H:%M").time()
+                start_time = datetime.strptime(
+                    period.get("start", "00:00"), "%H:%M").time()
+                end_time = datetime.strptime(
+                    period.get("end", "00:00"), "%H:%M").time()
                 if start_time <= end_time:
-                    if start_time <= now_time <= end_time: return True
+                    if start_time <= now_time <= end_time:
+                        return True
                 else:
-                    if start_time <= now_time or now_time <= end_time: return True
+                    if start_time <= now_time or now_time <= end_time:
+                        return True
             return False
         except:
             return True
@@ -150,7 +163,8 @@ class Detector:
 
                     new_high_res = None
                     if self.system.state.frame_high_res is not None and self.system.state.frame_high_res[self.frame_num] is not None:
-                         new_high_res = self.system.state.frame_high_res[self.frame_num].copy()
+                        new_high_res = self.system.state.frame_high_res[self.frame_num].copy(
+                        )
 
                     # 1. 使用 MediaPipe 偵測人臉 (Full Frame)
                     rgb_frame = cv2.cvtColor(new_frame, cv2.COLOR_BGR2RGB)
@@ -158,42 +172,9 @@ class Detector:
 
                     box = None
                     points = None
-                    is_pass_2 = False
-
-                    if (boxes is None or len(boxes) == 0) and CONFIG.get("Long_distance_mode", False):
-                        # --- Pass 2: Digital Zoom (800x800 center-top crop) ---
-                        h_source, w_source = rgb_frame.shape[:2]
-                        crop_size = 800
-                        cx = w_source // 2
-                        cy = int(h_source * 0.4) # 偏上方裁切
-                        
-                        x_start = max(0, cx - crop_size // 2)
-                        y_start = max(0, cy - crop_size // 2)
-                        x_end = min(w_source, cx + crop_size // 2)
-                        y_end = min(h_source, cy + crop_size // 2)
-
-                        cropped_rgb = rgb_frame[y_start:y_end, x_start:x_end]
-                        boxes_crop, _, landmarks_crop = self.mp_handler_zoom.detect(cropped_rgb)
-
-                        if boxes_crop is not None and len(boxes_crop) > 0:
-                            rx1, ry1, rx2, ry2 = boxes_crop[0]
-                            rx1 += x_start
-                            rx2 += x_start
-                            ry1 += y_start
-                            ry2 += y_start
-                            boxes = [[rx1, ry1, rx2, ry2]]
-                            
-                            restored_landmarks = []
-                            for lm in landmarks_crop[0]:
-                                restored_landmarks.append([lm[0] + x_start, lm[1] + y_start])
-                            landmarks = [np.array(restored_landmarks)]
-                            is_pass_2 = True
-                            
-                            if not hasattr(self, 'last_pass2_log_time'): self.last_pass2_log_time = 0
-                            if now - self.last_pass2_log_time > 1.0:
-                                LOGGER.info(f"[Two-Pass] 攝影機 {self.frame_num} - 裁切變焦成功抓到小臉! 寬: {rx2-rx1}px")
-                                self.last_pass2_log_time = now
-                        # ----------------------------------------------------
+                    legacy_face_zoom_flag = False
+                    clothes_long_distance = CONFIG.get(
+                        "Long_distance_mode", False)
 
                     is_entry_now = self._is_entry_active()
                     clothes_active = self.do_clothes and is_entry_now
@@ -227,38 +208,43 @@ class Detector:
                         # [2026-03-06 Revert] Strict threshold when clothes mode is On
                         # Avoid "請靠近" when clothes detection is on, only start when >= min_face
                         det_ratio = 1.0 if clothes_active else POTENTIAL_MISS_RATIO
-                        
-                        # [Two-Pass] 若為遠距特權，解除初階過濾的尺寸限制
-                        if is_pass_2:
-                            min_face_val = 35
 
                         if center_x < roi_x1 or center_x > roi_x2 or face_width < (min_face_val * det_ratio):
                             box = None
-                            points = None # 被過濾掉視為無效
+                            points = None  # 被過濾掉視為無效
                         else:
                             box = [x1, y1, x2, y2]
                             self.system.mp_detectors[self.frame_num] = self.mp_handler
                             self.last_face_time = time.time()
                     else:
-                         # No boxes found
-                         face_width = 0
+                        # No boxes found
+                        face_width = 0
 
                     if box is None:
                         # Ensure face_width is initialized if boxes was None
-                        if 'face_width' not in locals(): face_width = 0
+                        if 'face_width' not in locals():
+                            face_width = 0
 
-                    # 2. 執行衣著偵測 (依賴 Landmarks 進行 PPE 細節檢查)
-                    should_detect_clothes = clothes_active and box is not None
+                    # 2. 執行衣著偵測。遠距模式只放寬服裝偵測，不放寬臉辨 min_face。
+                    should_detect_clothes = clothes_active
                     current_clothes_detections = []
-                    current_clothes_details = {} # [2026-02-12 Feature] Store detailed JSON log
+                    # [2026-02-12 Feature] Store detailed JSON log
+                    current_clothes_details = {}
 
                     if should_detect_clothes:
                         local_clothes_state = [False, False, False]
+                        self.system.state.clothes_display_suppressed[self.frame_num] = False
                         self.mask_frame, x_offset = self.apply_mask(new_frame)
                         try:
                             # 傳入 points (可能為 None，若無人臉或被過濾)
                             # [2026-02-12 Fix] Updated signature to return details
-                            current_clothes_detections, current_clothes_details = self.clothes_detector(x_offset, local_clothes_state, landmarks=points)
+                            current_clothes_detections, current_clothes_details = self.clothes_detector(
+                                x_offset,
+                                local_clothes_state,
+                                landmarks=points,
+                                target_face_box=box,
+                                enable_zoom=clothes_long_distance
+                            )
                         except Exception as e:
                             LOGGER.error(f"衣著偵測失敗: {e}")
 
@@ -266,109 +252,60 @@ class Detector:
                         now_t = time.time()
                         for i in range(3):
                             if not local_clothes_state[i]:
-                                if (now_t - self.clothe_time[i]) < 1.0:
+                                if (now_t - self.clothe_time[i]) < self.clothe_hold_seconds[i]:
                                     local_clothes_state[i] = True
                         self.system.state.clothes = local_clothes_state
+                        self.system.state.clothes_gate_pass = bool(
+                            local_clothes_state[0] and local_clothes_state[2])
+                        self.system.state.clothes_gate_time = now if self.system.state.clothes_gate_pass else 0.0
                     else:
                         if self.do_clothes:
                             self.system.state.clothes = [False, False, False]
+                            self.system.state.clothes_gate_pass = False
+                            self.system.state.clothes_gate_time = 0.0
                             self.system.state.clothes_display_suppressed[self.frame_num] = False
 
                     # 3. QR Code (省略，保持原位)
                     if CONFIG.get("qrcode_mode", False) and (now - self.last_qr_scan_time > self.qr_scan_interval):
-                         # ... (QR Code logic unchanged) ...
-                         pass
+                        # ... (QR Code logic unchanged) ...
+                        pass
+
+                    clothes_gate_required = self._clothes_gate_required()
+                    clothes_gate_pass = bool(
+                        getattr(self.system.state, "clothes_gate_pass", False) and
+                        now - getattr(self.system.state,
+                                      "clothes_gate_time", 0.0) <= 0.5
+                    )
+
+                    # 鐵則：服裝辨識開啟後，未同時通過安全帽+背心，不產生臉辨資料。
+                    if clothes_gate_required and not clothes_gate_pass:
+                        self.system.state.hint_text[self.frame_num] = "請正確著裝"
+                        self.system.state.frame_data[self.frame_num] = None
+                        self.system.state.gaze_status[self.frame_num] = None
+                        self.system.state.head_pose[self.frame_num] = None
+                        if box is not None:
+                            self.system.state.max_box[self.frame_num] = box
+                            self.system.state.max_points[self.frame_num] = points
+                        else:
+                            self.system.state.max_box[self.frame_num] = None
+                            self.system.state.max_points[self.frame_num] = None
+                        last_box = box
+                        last_points = points
+                        last_time = time.time()
+                        continue
 
                     # 4. 處理人臉後續邏輯 (阻斷/Gaze/Update)
                     if box is not None:
-                        # [2026-02-06 Fix] 語音優先級控制 (阻斷邏輯) + 水平匹配驗證
-                        if self.do_clothes and CONFIG.get("Clothes_detection", False) and is_entry_now:
-                            # [2026-03-12 Fix] Use debounced global state instead of per-frame detections to prevent jitter block
-                            has_vest = self.system.state.clothes[0]
-                            has_helmet = self.system.state.clothes[2]
-
-                            if not (has_vest and has_helmet):
-                                # ... (阻斷邏輯) ...
-                                if time.time() - self.last_no_face_log_time > 2.0:
-                                    self.system.speaker.say("請正確著裝", "hint_clothes_block", priority=2)
-                                    self.last_no_face_log_time = time.time()
-
-                                    # [2026-02-09 Fix] 主動存檔 ClothesFail (Unknown User)
-                                    # 由於阻斷發生在識別前，無法得知身分，僅存截圖供稽核
-                                    try:
-                                        # [Safety] Re-fetch min_face from state to avoid UnboundLocalError
-                                        safe_min_face = self.system.state.min_face[self.frame_num]
-
-                                        # [Critical Fix] Find Comparison instance in CameraSystem (not FaceRecognitionSystem)
-                                        # FaceRecognitionSystem -> cameras list -> CameraSystem -> compar
-                                        compar_instance = None
-                                        if hasattr(self.system, 'cameras'):
-                                            for cam in self.system.cameras:
-                                                if cam.frame_num == self.frame_num:
-                                                    compar_instance = cam.compar
-                                                    break
-
-                                        if compar_instance:
-                                            saved_path = compar_instance._save_potential_miss_image(
-                                                new_frame,
-                                                face_width,
-                                                safe_min_face,
-                                                CAM_NAME_MAP.get(self.frame_num, f"Cam {self.frame_num}"),
-                                                reason="ClothesFail"
-                                            )
-
-                                            # [2026-02-12 Feature] Save Detailed JSON if available
-                                            if saved_path and current_clothes_details:
-                                                # Inject face info into existing details
-                                                current_clothes_details["filename"] = os.path.basename(saved_path)
-                                                current_clothes_details["face"] = {"detected": True, "width": int(face_width)}
-
-                                                # Construct summary status
-                                                status_list = []
-                                                if not has_helmet: status_list.append("Helmet Issue")
-                                                if not has_vest: status_list.append("Vest Issue")
-                                                current_clothes_details["overall_status"] = "FAIL: " + ", ".join(status_list)
-
-                                                # [2026-03-10 Fix] Strip non-serializable crop_img (numpy arrays) before JSON dump
-                                                json_safe_details = {}
-                                                for k, v in current_clothes_details.items():
-                                                    if isinstance(v, dict):
-                                                        json_safe_details[k] = {dk: dv for dk, dv in v.items() if dk != "crop_img"}
-                                                    else:
-                                                        json_safe_details[k] = v
-
-                                                compar_instance._save_potential_miss_json(
-                                                    saved_path,
-                                                    json_safe_details,
-                                                    "ClothesFail"
-                                                )
-                                        else:
-                                            LOGGER.error(f"Cannot find Comparison instance for Cam {self.frame_num}")
-
-                                    except Exception as e:
-                                        LOGGER.error(f"Save ClothesFail image failed: {e}")
-
-                                self.system.state.hint_text[self.frame_num] = "請正確著裝"
-                                self.system.state.frame_data[self.frame_num] = None
-                                self.system.state.max_box[self.frame_num] = box
-                                self.system.state.max_points[self.frame_num] = points
-                                self.system.state.gaze_status[self.frame_num] = None
-
-                                last_box = box
-                                last_points = points
-                                last_time = time.time()
-                                continue
-
                         # 正常流程 (Gaze, Update State)
-                        if is_pass_2:
-                            g_pass, g_msg, g_pose, g_ear = self.mp_handler_zoom.check_gaze(0)
-                        else:
-                            g_pass, g_msg, g_pose, g_ear = self.mp_handler.check_gaze(0)
-                        self.system.state.gaze_status[self.frame_num] = (g_pass, g_msg, g_pose, g_ear)
+                        g_pass, g_msg, g_pose, g_ear = self.mp_handler.check_gaze(
+                            0)
+                        self.system.state.gaze_status[self.frame_num] = (
+                            g_pass, g_msg, g_pose, g_ear)
                         self.system.state.head_pose[self.frame_num] = g_pose
 
                         g_status = self.system.state.gaze_status[self.frame_num]
-                        self.system.state.frame_data[self.frame_num] = (new_frame, g_status, box, points, is_pass_2)
+                        self.system.state.frame_data[self.frame_num] = (
+                            new_frame, g_status, box, points, legacy_face_zoom_flag)
                     else:
                         self.system.state.gaze_status[self.frame_num] = None
                         self.system.state.head_pose[self.frame_num] = None
@@ -390,33 +327,25 @@ class Detector:
 
             time.sleep(0.01)
 
-
-
-    def clothes_detector(self, X_offset, state_buffer=None, landmarks=None):
-        """
-        使用 YOLO 模型進行衣著偵測，並結合 PPE Classifier 驗證穿戴正確性。
-
-        Parameters:
-        X_offset (int): 圖像遮罩偏移量。
-        state_buffer (list): 狀態寫入緩衝。
-        landmarks (np.array): 人臉關鍵點 (用於定位下巴/胸口)。
-        """
-        # [2026-02-09 Fix] 支援熱更新：主動請求載入模型
     def _crop_head_mesh(self, frame, landmarks):
         """
         [2026-02-12 Feature] Precision Head Crop using Face Mesh (468 pts)
         """
         h, w = frame.shape[:2]
-        def get_pt(idx): return int(landmarks[idx].x * w), int(landmarks[idx].y * h)
+        def get_pt(idx): return int(
+            landmarks[idx].x * w), int(landmarks[idx].y * h)
 
         # 10:Top, 152:Chin, 234:Left, 454:Right
-        top = get_pt(10); chin = get_pt(152)
-        left = get_pt(234); right = get_pt(454)
+        top = get_pt(10)
+        chin = get_pt(152)
+        left = get_pt(234)
+        right = get_pt(454)
 
         face_h = chin[1] - top[1]
         face_w = right[0] - left[0]
 
-        if face_h <= 0 or face_w <= 0: return None
+        if face_h <= 0 or face_w <= 0:
+            return None
 
         # [2026-02-12 Tuning] Anchor-based cropping for precise control
         # Expanded pad_top to 1.5 to ensure full helmet visibility
@@ -446,8 +375,10 @@ class Detector:
         lm = pose_landmarks.landmark
         def get_xy(idx): return int(lm[idx].x * w), int(lm[idx].y * h)
 
-        ls = get_xy(11); rs = get_xy(12) # Shoulders
-        lh = get_xy(23); rh = get_xy(24) # Hips
+        ls = get_xy(11)
+        rs = get_xy(12)  # Shoulders
+        lh = get_xy(23)
+        rh = get_xy(24)  # Hips
 
         # Strict Visibility Check for Shoulders (Crucial for Vest)
         if lm[11].visibility < 0.6 or lm[12].visibility < 0.6:
@@ -461,7 +392,8 @@ class Detector:
         # Torso Height (Shoulder to Hip)
         torso_h = abs(lh[1] - ls[1])
 
-        if shoulder_w <= 0 or torso_h <= 0: return None, 0, 0
+        if shoulder_w <= 0 or torso_h <= 0:
+            return None, 0, 0
 
         # Dynamic Box Size
         # Width: Expanded to 2.2 for more context
@@ -474,7 +406,8 @@ class Detector:
 
         # Expanded top padding to 0.3
         y1 = max(0, shoulder_mid_y - int(target_h * 0.3))
-        y2 = min(h, shoulder_mid_y + int(target_h * 0.85)) # Push remaining height down
+        # Push remaining height down
+        y2 = min(h, shoulder_mid_y + int(target_h * 0.85))
         x1 = max(0, center_x - int(target_w * 0.5))
         x2 = min(w, center_x + int(target_w * 0.5))
 
@@ -482,42 +415,107 @@ class Detector:
             return frame[y1:y2, x1:x2], x1, y1
         return None, 0, 0
 
-    def clothes_detector(self, X_offset, state_buffer=None, landmarks=None):
-        """
-        [2026-02-12 Refactor] Hybrid Detection Strategy
-        Priority 1: Crop-Based Detection (High Precision)
-        Priority 2: Full-Frame Fallback (High Recall)
-        """
-    def clothes_detector(self, x_offset, state_buffer, landmarks=None):
+    def clothes_detector(self, x_offset, state_buffer, landmarks=None, target_face_box=None, enable_zoom=False):
         """
         [2026-03] Simplified PPE Detection (Presence-based)
         Ensures the detected PPE is worn by the target person via spatial overlap.
         """
         if not hasattr(self.system, 'model_clothes') or self.system.model_clothes is None:
-            if hasattr(self.system, 'load_clothes_model'): self.system.load_clothes_model()
+            if hasattr(self.system, 'load_clothes_model'):
+                self.system.load_clothes_model()
             if not hasattr(self.system, 'model_clothes') or self.system.model_clothes is None:
                 return [], {}
 
         full_frame = self.system.state.frame[self.frame_num]
-        if full_frame is None: return [], {}
-
-        # The bounding box of the recognized person's face from FaceNet
-        target_face_box = self.system.state.max_box[self.frame_num]
+        if full_frame is None:
+            return [], {}
 
         detections = []
         details = {
             "helmet": {"detected": False, "crop_img": None, "crop_boxes": [], "fallback_box": None},
-            "vest": {"detected": False, "crop_img": None, "crop_boxes": [], "fallback_box": None}
+            "vest": {"detected": False, "crop_img": None, "crop_boxes": [], "fallback_box": None},
+            "zoom_enabled": bool(enable_zoom)
         }
 
-        fallback_results = None
-        fallback_offset = 0
+        fallback_cache = {}
 
-        def get_fallback_results():
+        def get_fallback_results(region="full"):
             # Use masked frame to horizontally filter background persons.
             # Spatial validator then handles remaining edge cases.
+            if region in fallback_cache:
+                return fallback_cache[region]
+
             mask_frame, mx_offset = self.apply_mask(full_frame)
-            return self.system.model_clothes(source=mask_frame, iou=0.45, conf=0.15, verbose=False)[0], mx_offset
+            y_offset = 0
+
+            # For distant vests, full-height frames shrink the torso before YOLO sees it.
+            # Crop to body band so the vest occupies more of the detector input.
+            if enable_zoom and region.startswith("body"):
+                h = mask_frame.shape[0]
+                w = mask_frame.shape[1]
+
+                use_dynamic_crop = region.startswith(
+                    "body_dynamic") and target_face_box is not None
+                if use_dynamic_crop:
+                    fx1, fy1, fx2, fy2 = target_face_box
+                    face_w = max(1, fx2 - fx1)
+                    face_h = max(1, fy2 - fy1)
+                    face_cx = int(((fx1 + fx2) / 2) - mx_offset)
+                    dynamic_y = {
+                        "body_dynamic_high": (-1.1, 4.9),
+                        "body_dynamic": (-0.4, 5.8),
+                        "body_dynamic_low": (0.3, 6.8),
+                    }
+                    y_top_mul, y_bot_mul = dynamic_y.get(
+                        region, dynamic_y["body_dynamic"])
+
+                    crop_w = max(int(face_w * 6.0), int(w * 0.65))
+                    x1 = max(0, face_cx - crop_w // 2)
+                    x2 = min(w, face_cx + crop_w // 2)
+                    if x2 - x1 < crop_w:
+                        if x1 == 0:
+                            x2 = min(w, crop_w)
+                        elif x2 == w:
+                            x1 = max(0, w - crop_w)
+
+                    y1 = max(0, int(fy2 + face_h * y_top_mul))
+                    y2 = min(h, int(fy2 + face_h * y_bot_mul))
+                    if y2 - y1 < int(h * 0.30):
+                        y1 = int(h * 0.12)
+                        y2 = int(h * 0.98)
+                        x1 = 0
+                        x2 = w
+
+                    mask_frame = mask_frame[y1:y2, x1:x2]
+                    mx_offset += x1
+                    y_offset = y1
+                    details["vest"].setdefault("fallback_crops", []).append({
+                        "region": region,
+                        "box": [mx_offset, y_offset, mx_offset + (x2 - x1), y_offset + (y2 - y1)]
+                    })
+                else:
+                    fixed_y = {
+                        "body_fixed_high": (0.04, 0.72),
+                        "body_fixed": (0.12, 0.98),
+                        "body_fixed_low": (0.25, 1.0),
+                        "body": (0.12, 0.98),
+                    }
+                    y1_ratio, y2_ratio = fixed_y.get(
+                        region, fixed_y["body_fixed"])
+                    y1 = int(h * y1_ratio)
+                    y2 = int(h * y2_ratio)
+                    mask_frame = mask_frame[y1:y2, :]
+                    y_offset = y1
+                    details["vest"].setdefault("fallback_crops", []).append({
+                        "region": region,
+                        "box": [mx_offset, y_offset, mx_offset + w, y_offset + (y2 - y1)]
+                    })
+
+            fallback_conf = 0.08 if enable_zoom and region.startswith("body") else 0.12
+            result = (self.system.model_clothes(
+                source=mask_frame, iou=0.45, conf=fallback_conf, verbose=False)[0], mx_offset, y_offset)
+            fallback_cache[region] = result
+            return result
 
         # --- Universal Spatial Validators ---
         def is_helmet_valid(bx1, by1, bx2, by2, det_conf=0.0):
@@ -539,7 +537,8 @@ class Detector:
             horizontal_aligned = abs(face_cx - helmet_cx) < face_w * 2.0
             not_too_high = by2 >= (fy1 - face_h * 0.3)
             above_chin = by1 < fy2
-            width_ratio_ok = (helmet_w >= face_w * 0.4) and (helmet_w <= face_w * 2.5)
+            width_ratio_ok = (helmet_w >= face_w *
+                              0.4) and (helmet_w <= face_w * 2.5)
 
             # [2026-03-10 Fix] Above-face ratio: what fraction of the helmet bbox is ABOVE fy1?
             # Conf-dependent threshold: high conf real helmets (>=0.5) get lenient check,
@@ -557,31 +556,40 @@ class Detector:
 
             return True, ""
 
-
-        def is_vest_valid(bx1, by1, bx2, by2):
+        def is_vest_valid(bx1, by1, bx2, by2, source="crop"):
             if target_face_box is None:
                 # Basic relative check for missing face_box
                 img_h, img_w = full_frame.shape[:2]
-                if by1 > img_h * 0.2 and (bx2 - bx1) > img_w * 0.15 and (by2 - by1) > img_h * 0.15:
+                vest_w = bx2 - bx1
+                vest_h = by2 - by1
+                if by1 > img_h * 0.12 and vest_w > img_w * 0.04 and vest_h > img_h * 0.05:
                     return True, "Passed (No Face Box, Spatial Fallback)"
-                return False, "No face box detected and invalid vest dimensions"
+                return False, f"No face box detected and invalid vest dimensions w={vest_w}, h={vest_h}"
 
             fx1, fy1, fx2, fy2 = target_face_box
             face_cx = (fx1 + fx2) / 2
             vest_cx = (bx1 + bx2) / 2
+            face_w = fx2 - fx1
             face_h = fy2 - fy1
 
-            horizontal_aligned = abs(face_cx - vest_cx) < (fx2 - fx1) * 3.0
+            # Mid-distance handoff: face is valid enough to create a face_box, but
+            # vest still needs zoom fallback. Keep horizontal binding, relax vertical scale.
+            zoom_fallback = enable_zoom and source.startswith("fallback")
+            horizontal_limit = face_w * (3.5 if zoom_fallback else 3.0)
+            vertical_limit = face_h * (3.2 if zoom_fallback else 1.8)
+            min_height_ratio = 0.35 if zoom_fallback else 0.5
+
+            horizontal_aligned = abs(face_cx - vest_cx) < horizontal_limit
             placed_below = by2 > fy2
-            not_too_far_down = by1 < (fy2 + face_h * 1.8)
+            not_too_far_down = by1 < (fy2 + vertical_limit)
 
             if not (horizontal_aligned and placed_below and not_too_far_down):
-                return False, f"Reject: horiz={horizontal_aligned}, below={placed_below}, not_far={not_too_far_down} | vy1,vy2={by1},{by2} fy2={fy2} | face_h={face_h}"
+                return False, f"Reject: src={source}, horiz={horizontal_aligned}, below={placed_below}, not_far={not_too_far_down} | vy1,vy2={by1},{by2} fy2={fy2} | face_h={face_h}, v_limit={vertical_limit:.0f}"
 
             # Height check: a folded/handheld vest has a very small bbox height.
             vest_bbox_h = by2 - by1
-            if vest_bbox_h < face_h * 0.5:
-                return False, f"Reject(height): vest_h={vest_bbox_h} < min={face_h*0.5:.0f} (face_h={face_h})"
+            if vest_bbox_h < face_h * min_height_ratio:
+                return False, f"Reject(height): src={source}, vest_h={vest_bbox_h} < min={face_h*min_height_ratio:.0f} (face_h={face_h})"
 
             return True, ""
 
@@ -591,53 +599,66 @@ class Detector:
         # 1.1 Precision Crop (full head_crop + face_coverage filter)
         mesh_results = self.mp_handler.detect_mesh(full_frame)
         if mesh_results:
-            head_crop, cx, cy = self._crop_head_mesh(full_frame, mesh_results[0].landmark)
+            head_crop, cx, cy = self._crop_head_mesh(
+                full_frame, mesh_results[0].landmark)
             if head_crop is not None and head_crop.size > 0:
                 details["helmet"]["crop_img"] = head_crop
-                h_results = self.system.model_clothes(source=head_crop, iou=0.45, conf=0.15, verbose=False)[0]
+                h_results = self.system.model_clothes(
+                    source=head_crop, iou=0.45, conf=0.15, verbose=False)[0]
                 for det in h_results.boxes:
                     if int(det.cls) == 2:
                         det_conf = float(det.conf[0])
-                        rx1, ry1, rx2, ry2 = det.xyxy[0].cpu().numpy().astype(int)
+                        rx1, ry1, rx2, ry2 = det.xyxy[0].cpu(
+                        ).numpy().astype(int)
                         gx1, gy1, gx2, gy2 = rx1 + cx, ry1 + cy, rx2 + cx, ry2 + cy
 
-                        valid, reason = is_helmet_valid(gx1, gy1, gx2, gy2, det_conf=det_conf)
-                        details["helmet"]["crop_boxes"].append([rx1, ry1, rx2, ry2])
+                        valid, reason = is_helmet_valid(
+                            gx1, gy1, gx2, gy2, det_conf=det_conf)
+                        details["helmet"]["crop_boxes"].append(
+                            [rx1, ry1, rx2, ry2])
                         details["helmet"]["conf"] = det_conf
 
                         if valid:
                             details["helmet"]["detected"] = True
                             detections.append((2, [gx1, gy1, gx2, gy2]))
                             helmet_found = True
-                            print(f"[DEBUG-HELMET-CROP] PASS conf={det_conf:.3f}")
+                            # print(
+                            #     f"[DEBUG-HELMET-CROP] PASS conf={det_conf:.3f}")
                             break
-                        else:
-                            print(f"[DEBUG-HELMET-CROP] {reason} conf={det_conf:.3f}")
+                        # else:
+                        #     print(
+                        #         f"[DEBUG-HELMET-CROP] {reason} conf={det_conf:.3f}")
 
         # 1.2 Fallback YOLO + Spatial Overlap
         if not helmet_found:
-            if fallback_results is None: fallback_results, fallback_offset = get_fallback_results()
+            fallback_results, fallback_offset, fallback_y_offset = get_fallback_results(
+                "full")
             for det in fallback_results.boxes:
                 if int(det.cls) == 2:
                     det_conf = float(det.conf[0])
                     if det_conf < 0.20:
                         continue
                     rx1, ry1, rx2, ry2 = det.xyxy[0].cpu().numpy().astype(int)
-                    gx1, gy1, gx2, gy2 = rx1 + fallback_offset, ry1, rx2 + fallback_offset, ry2
+                    gx1 = rx1 + fallback_offset
+                    gy1 = ry1 + fallback_y_offset
+                    gx2 = rx2 + fallback_offset
+                    gy2 = ry2 + fallback_y_offset
 
-                    valid, reason = is_helmet_valid(gx1, gy1, gx2, gy2, det_conf=det_conf)
+                    valid, reason = is_helmet_valid(
+                        gx1, gy1, gx2, gy2, det_conf=det_conf)
 
                     if valid:
                         details["helmet"]["detected"] = True
-                        details["helmet"]["fallback_box"] = [gx1, gy1, gx2, gy2]
+                        details["helmet"]["fallback_box"] = [
+                            gx1, gy1, gx2, gy2]
                         details["helmet"]["conf"] = det_conf
                         detections.append((2, [gx1, gy1, gx2, gy2]))
-                        print(f"[DEBUG-HELMET-FALLBACK] PASS conf={det_conf:.3f}")
+                        print(
+                            f"[DEBUG-HELMET-FALLBACK] PASS conf={det_conf:.3f}")
                         break
                     else:
-                        print(f"[DEBUG-HELMET-FALLBACK] {reason} conf={det_conf:.3f}")
-
-
+                        print(
+                            f"[DEBUG-HELMET-FALLBACK] {reason} conf={det_conf:.3f}")
 
         vest_found = False
 
@@ -657,62 +678,111 @@ class Detector:
 
             if pose_is_target:
                 self._last_pose_lm = lm  # Store for shoulder check in is_vest_valid
-                body_crop, cx, cy = self._crop_body_pose(full_frame, pose_res.pose_landmarks)
+                body_crop, cx, cy = self._crop_body_pose(
+                    full_frame, pose_res.pose_landmarks)
             else:
-                print(f"[DEBUG-VEST-POSE] Skipping pose: nose_x={nose_x} outside face_box=[{fx1},{fx2}]")
+                print(
+                    f"[DEBUG-VEST-POSE] Skipping pose: nose_x={nose_x} outside face_box=[{fx1},{fx2}]")
                 self._last_pose_lm = None
                 body_crop = None
 
             if body_crop is not None and body_crop.size > 0:
                 details["vest"]["crop_img"] = body_crop
-                v_results = self.system.model_clothes(source=body_crop, iou=0.45, conf=0.05, verbose=False)[0]
+                v_results = self.system.model_clothes(
+                    source=body_crop, iou=0.45, conf=0.05, verbose=False)[0]
                 for det in v_results.boxes:
                     if int(det.cls) == 0:
-                        rx1, ry1, rx2, ry2 = det.xyxy[0].cpu().numpy().astype(int)
+                        rx1, ry1, rx2, ry2 = det.xyxy[0].cpu(
+                        ).numpy().astype(int)
                         gx1, gy1, gx2, gy2 = rx1 + cx, ry1 + cy, rx2 + cx, ry2 + cy
 
-                        valid, reason = is_vest_valid(gx1, gy1, gx2, gy2)
-                        details["vest"]["crop_boxes"].append([rx1, ry1, rx2, ry2])
+                        valid, reason = is_vest_valid(
+                            gx1, gy1, gx2, gy2, source="crop")
+                        details["vest"]["crop_boxes"].append(
+                            [rx1, ry1, rx2, ry2])
 
                         if valid:
                             details["vest"]["detected"] = True
                             detections.append((0, [gx1, gy1, gx2, gy2]))
                             vest_found = True
                             break
-                        else:
-                            print(f"[DEBUG-VEST-CROP] {reason}")
+                        # else:
+                        #     print(f"[DEBUG-VEST-CROP] {reason}")
 
         # 2.2 Fallback YOLO + Spatial Overlap
         if not vest_found:
-            if fallback_results is None: fallback_results, fallback_offset = get_fallback_results()
-            for det in fallback_results.boxes:
-                if int(det.cls) == 0:
-                    det_conf = float(det.conf[0])
-                    if det_conf < 0.20:
-                        continue
-                    rx1, ry1, rx2, ry2 = det.xyxy[0].cpu().numpy().astype(int)
-                    gx1, gy1, gx2, gy2 = rx1 + fallback_offset, ry1, rx2 + fallback_offset, ry2
+            if enable_zoom:
+                fallback_regions = [
+                    "body_dynamic_high",
+                    "body_dynamic",
+                    "body_dynamic_low",
+                    "body_fixed_high",
+                    "body_fixed",
+                    "body_fixed_low",
+                    "full",
+                ]
+                if target_face_box is None:
+                    fallback_regions = [
+                        "body_fixed_high",
+                        "body_fixed",
+                        "body_fixed_low",
+                        "full",
+                    ]
+            else:
+                fallback_regions = ["body"]
 
-                    valid, reason = is_vest_valid(gx1, gy1, gx2, gy2)
+            best_vest = None
+            for fallback_region in fallback_regions:
+                fallback_results, fallback_offset, fallback_y_offset = get_fallback_results(
+                    fallback_region)
+                for det in fallback_results.boxes:
+                    if int(det.cls) == 0:
+                        det_conf = float(det.conf[0])
+                        if det_conf < 0.08:
+                            continue
+                        rx1, ry1, rx2, ry2 = det.xyxy[0].cpu().numpy().astype(int)
+                        gx1 = rx1 + fallback_offset
+                        gy1 = ry1 + fallback_y_offset
+                        gx2 = rx2 + fallback_offset
+                        gy2 = ry2 + fallback_y_offset
 
-                    if valid:
-                        details["vest"]["detected"] = True
-                        details["vest"]["fallback_box"] = [gx1, gy1, gx2, gy2]
-                        detections.append((0, [gx1, gy1, gx2, gy2]))
-                        break
-                    else:
-                        print(f"[DEBUG-VEST-FALLBACK] {reason}")
+                        valid, reason = is_vest_valid(
+                            gx1, gy1, gx2, gy2, source=f"fallback:{fallback_region}")
+
+                        if valid:
+                            if best_vest is None or det_conf > best_vest["conf"]:
+                                best_vest = {
+                                    "box": [gx1, gy1, gx2, gy2],
+                                    "conf": det_conf,
+                                    "region": fallback_region,
+                                }
+                        else:
+                            print(
+                                f"[DEBUG-VEST-FALLBACK] region={fallback_region} {reason} conf={det_conf:.3f}")
+            if best_vest is not None:
+                details["vest"]["detected"] = True
+                details["vest"]["fallback_box"] = best_vest["box"]
+                details["vest"]["fallback_region"] = best_vest["region"]
+                details["vest"]["conf"] = best_vest["conf"]
+                detections.append((0, best_vest["box"]))
+                vest_found = True
+                print(
+                    f"[DEBUG-VEST-FALLBACK] BEST region={best_vest['region']} conf={best_vest['conf']:.3f}")
 
         # Update State
         if details["helmet"]["detected"]:
-             if state_buffer is not None: state_buffer[2] = True
-             else: self.system.state.clothes[2] = True
-             self.clothe_time[2] = time.time()
+            if state_buffer is not None:
+                state_buffer[2] = True
+            else:
+                self.system.state.clothes[2] = True
+            self.clothe_time[2] = time.time()
 
         if details["vest"]["detected"]:
-             if state_buffer is not None: state_buffer[0] = True
-             else: self.system.state.clothes[0] = True
-             self.clothe_time[0] = time.time()
+            if state_buffer is not None:
+                state_buffer[0] = True
+            else:
+                self.system.state.clothes[0] = True
+            self.clothe_time[0] = time.time()
 
         return detections, details
 
@@ -738,8 +808,10 @@ class Detector:
             box_cx = (bx1 + bx2) / 2
 
             if abs(box_cx - face_cx) < threshold:
-                if cls == 2: has_helmet = True
-                elif cls == 0: has_vest = True
+                if cls == 2:
+                    has_helmet = True
+                elif cls == 0:
+                    has_vest = True
 
         return has_vest, has_helmet
 
@@ -826,7 +898,7 @@ class Comparison:
         self.display_state = {'person_id': 'None', 'last_update': 0}
         self.last_recognition_time = 0
 
-        self.last_api_trigger_time = {} # 記錄每個人員上次觸發API/語音的時間，用於防止短時間重複播報
+        self.last_api_trigger_time = {}  # 記錄每個人員上次觸發API/語音的時間，用於防止短時間重複播報
 
         self.DISPLAY_STATE_HOLD_SECONDS = 2  # 辨識成功後，名稱顯示的持續時間
         self.CONFIDENCE_THRESHOLD = 0.7      # 可靠辨識的信賴度門檻 (員工)
@@ -835,8 +907,9 @@ class Comparison:
         # --- 新增: 潛在辨識失敗分析與統計 ---
         self.width_stats = defaultdict(int)  # 統計人臉寬度分佈 (區間:次數)
         self.last_stats_log_time = 0         # 上次輸出統計表的時間
-        self.potential_miss_ratio = POTENTIAL_MISS_RATIO # 潛在失敗判定門檻 (min_face * ratio)
-        self.last_potential_miss_log_time = 0 # 上次記錄潛在失敗的時間 (限流用)
+        # 潛在失敗判定門檻 (min_face * ratio)
+        self.potential_miss_ratio = POTENTIAL_MISS_RATIO
+        self.last_potential_miss_log_time = 0  # 上次記錄潛在失敗的時間 (限流用)
         self.hint_clear_time = 0             # 提示文字清除時間
         self.last_hint_speak_time = 0        # 上次播報提示語音的時間
         # ---------------------------------
@@ -856,17 +929,20 @@ class Comparison:
 
             # 決定位置標記
             cam_tag = "Out" if "Out" in camera_name or "出口" in camera_name else "In"
-            if "Cam" in camera_name: # Fallback for "Cam 0", "Cam 1"
-                 cam_tag = "Out" if "1" in camera_name else "In"
+            if "Cam" in camera_name:  # Fallback for "Cam 0", "Cam 1"
+                cam_tag = "Out" if "1" in camera_name else "In"
 
             # 建立目錄 img_log/potential_miss/YYYY_MM_DD
-            save_dir = os.path.join(os.getcwd(), "img_log", "potential_miss", today_str)
+            save_dir = os.path.join(
+                os.getcwd(), "img_log", "potential_miss", today_str)
             os.makedirs(save_dir, exist_ok=True)
 
             # Sanitize reason string for filename
-            safe_reason = reason.replace(" ", "_").replace("/", "-").replace(":", "").replace("(", "").replace(")", "").replace("<", "lt").replace(">", "gt")
+            safe_reason = reason.replace(" ", "_").replace("/", "-").replace(
+                ":", "").replace("(", "").replace(")", "").replace("<", "lt").replace(">", "gt")
             # Limit length to avoid OS limits
-            if len(safe_reason) > 50: safe_reason = safe_reason[:50]
+            if len(safe_reason) > 50:
+                safe_reason = safe_reason[:50]
 
             # 檔名格式: HH;MM;SS_In_W{width}_Fail_{reason}.jpg
             filename = f"{time_str}_{cam_tag}_W{width}_Fail_{safe_reason}.jpg"
@@ -893,13 +969,17 @@ class Comparison:
 
             # [2026-03-10 Fix] Add default converter for numpy types to prevent truncation
             def _default_converter(o):
-                if isinstance(o, (np.integer,)): return int(o)
-                if isinstance(o, (np.floating,)): return float(o)
-                if isinstance(o, np.ndarray): return o.tolist()
+                if isinstance(o, (np.integer,)):
+                    return int(o)
+                if isinstance(o, (np.floating,)):
+                    return float(o)
+                if isinstance(o, np.ndarray):
+                    return o.tolist()
                 return str(o)
 
             with open(json_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2, default=_default_converter)
+                json.dump(data, f, ensure_ascii=False,
+                          indent=2, default=_default_converter)
 
         except Exception as e:
             LOGGER.error(f"儲存潛在失敗 JSON 時發生錯誤: {e}")
@@ -918,7 +998,7 @@ class Comparison:
         face_center_x = (box[0] + box[2]) / 2
         frame_center_x = frame_w / 2
         offset = abs(face_center_x - frame_center_x)
-        limit_offset = frame_w * 0.15 # 允許偏離 15%
+        limit_offset = frame_w * 0.15  # 允許偏離 15%
         margin = 5
 
         # [2026-01-30 Fix] Initialize current_ear to prevent UnboundLocalError if face_w <= 100
@@ -933,7 +1013,7 @@ class Comparison:
             'gaze_msg': 'Init',
             'ear': 1.0,
             'v_ratio': 0.0,
-            'roll_angle': 0.0, # Not strictly calculated here, but could be added if needed
+            'roll_angle': 0.0,  # Not strictly calculated here, but could be added if needed
             'pitch_check': 'Pass',
             'yaw_check': 'Pass'
         }
@@ -947,12 +1027,13 @@ class Comparison:
         for i, p in enumerate(points):
             if p[0] < margin or p[0] > frame_w - margin or \
                p[1] < margin or p[1] > frame_h - margin:
-                 return 0.0, f"特徵點被切除/遮擋 (點{i}座標 {p} 超出邊界)", metrics
+                return 0.0, f"特徵點被切除/遮擋 (點{i}座標 {p} 超出邊界)", metrics
 
         # ---------------------------------------------------------
         # 2.5 夕陽/強光檢查 (Sunset/Overexposure) - [2026-02-07 Feature]
         # ---------------------------------------------------------
-        from init.function import is_sunset_condition # Local import to avoid circular dependency
+        # Local import to avoid circular dependency
+        from init.function import is_sunset_condition
 
         # 由於此檢查需要 crop ROI，為了效能，只在人臉足夠大時執行
         face_w = max(10, box[2] - box[0])
@@ -978,8 +1059,10 @@ class Comparison:
                 if len(gaze_status) >= 4:
                     current_ear = gaze_status[3]
                     pose_tuple = gaze_status[2]
-                elif hasattr(self.system.state, 'face_ear'): # Fallback for backward compatibility
-                    current_ear = self.system.state.face_ear.get(self.frame_num, 1.0)
+                # Fallback for backward compatibility
+                elif hasattr(self.system.state, 'face_ear'):
+                    current_ear = self.system.state.face_ear.get(
+                        self.frame_num, 1.0)
 
                 metrics['gaze_passed'] = is_looking
                 metrics['gaze_msg'] = gaze_msg
@@ -995,7 +1078,8 @@ class Comparison:
                 # 1. Yaw > 15 AND Pitch > 10 (Both distinct deviations) -> Dangerous
                 # 2. Roll > 15 (Tilt) -> Dangerous
                 # [2026-04-15] 修正邏輯：只要任一角度過大就是不良姿態 (or)
-                is_bad_pose = (abs(yaw) > 25 or abs(pitch) > 20) or abs(roll) > 20
+                is_bad_pose = (abs(yaw) > 25 or abs(
+                    pitch) > 20) or abs(roll) > 20
                 metrics['is_bad_pose'] = is_bad_pose
 
                 if not is_looking:
@@ -1005,7 +1089,8 @@ class Comparison:
                 # 根據實測校正：yaw 25~28° 的照片仍可正常辨識 (6 張實證)，
                 # 因此硬攔截閾值從 25° 提升至 30°，避免誤殺。
                 # is_bad_pose (yaw>25) 仍保留用於辨識階段提高 confidence 門檻。
-                is_extreme_pose = abs(yaw) > 30 or abs(pitch) > 25 or abs(roll) > 25
+                is_extreme_pose = abs(yaw) > 30 or abs(
+                    pitch) > 25 or abs(roll) > 25
                 if is_extreme_pose:
                     return 0.0, f"姿態不良 (Yaw:{yaw:.1f}° Pitch:{pitch:.1f}° Roll:{roll:.1f}°)", metrics
             else:
@@ -1104,7 +1189,8 @@ class Comparison:
             pitch_penalty = max(0, abs(pitch) - 15) * 0.005
             roll_penalty = max(0, abs(roll) - 5) * 0.005
 
-            total_penalty = min(0.20, yaw_penalty + pitch_penalty + roll_penalty)
+            total_penalty = min(0.20, yaw_penalty +
+                                pitch_penalty + roll_penalty)
             quality_score -= total_penalty
 
         return quality_score, "Pass", metrics
@@ -1122,6 +1208,26 @@ class Comparison:
             self.system.state.clothes_display_suppressed[self.frame_num] = True
         else:
             self.system.state.clothes_display_suppressed[self.frame_num] = False
+
+    def _clear_recognition_state(self):
+        if self.display_state['person_id'] != 'None' or self.system.state.same_class[self.frame_num] != "None":
+            self._update_display_state('None')
+        self.system.state.same_people[self.frame_num] = 0.0
+        self.system.state.same_zscore[self.frame_num] = 0.0
+        self.system.state.same_width[self.frame_num] = 0
+        if self.system.state.success_snapshot:
+            self.system.state.success_snapshot[self.frame_num] = None
+        if self.system.state.success_metadata:
+            self.system.state.success_metadata[self.frame_num] = None
+
+    def _clothes_gate_required(self):
+        return self.frame_num == 0 and (CONFIG.get("Clothes_detection", False) or CONFIG.get("Clothes_show", False))
+
+    def _clothes_gate_is_fresh(self):
+        return bool(
+            getattr(self.system.state, "clothes_gate_pass", False) and
+            time.time() - getattr(self.system.state, "clothes_gate_time", 0.0) <= 0.5
+        )
 
     def face_comparison(self):
         """
@@ -1151,19 +1257,14 @@ class Comparison:
             # 確保 影像(frame), 狀態(gaze), 位置(box) 來自同一時間點 (Snapshot)
             data_package = self.system.state.frame_data[self.frame_num]
             if data_package is None:
-                continue # 如果沒資料 (例如 Detector 阻斷中)，就繼續睡，別動 Hint！
+                if self._clothes_gate_required() and not self._clothes_gate_is_fresh():
+                    self._clear_recognition_state()
+                continue  # 如果沒資料 (例如 Detector 阻斷中)，就繼續睡，別動 Hint！
 
-            # [2026-03-06] Clothes gate: if Clothes_detection is ON and camera is in entry mode,
-            # skip face recognition entirely until both helmet and vest are detected.
-            if CONFIG.get("Clothes_detection", False):
-                _is_entry = True
-                if hasattr(self.system, 'cameras'):
-                    for _cam in self.system.cameras:
-                        if _cam.frame_num == self.frame_num:
-                            _is_entry = _cam._is_entry_active()
-                            break
-                if _is_entry and not (self.system.state.clothes[0] and self.system.state.clothes[2]):
-                    continue
+            # 鐵則：服裝辨識開啟後，服裝未通過前不進入臉辨。
+            if self._clothes_gate_required() and not self._clothes_gate_is_fresh():
+                self._clear_recognition_state()
+                continue
 
             # [2026-02-10 Fix] Move hint clearing logic AFTER data check
             # This prevents Race Condition where Comparison clears the hint while Detector is blocking.
@@ -1171,10 +1272,11 @@ class Comparison:
             if now > self.hint_clear_time:
                 self.system.state.hint_text[self.frame_num] = ""
 
-            _frame, _gaze_status, _box, _points, _is_pass_2 = data_package
+            _frame, _gaze_status, _box, _points, _legacy_face_zoom_flag = data_package
 
             # 使用解包出來的 frame，而不是去讀可能已經被覆蓋的 system.state.frame_mtcnn
-            self.system.state.frame_mtcnn[self.frame_num] = _frame # 為了相容其他可能讀取這欄位的地方(如UI?)
+            # 為了相容其他可能讀取這欄位的地方(如UI?)
+            self.system.state.frame_mtcnn[self.frame_num] = _frame
 
             if _box is None or _points is None or _frame is None:
                 continue
@@ -1183,17 +1285,12 @@ class Comparison:
             frame_curr = _frame
             frame_h, frame_w, _ = frame_curr.shape
 
-            camera_name = CAM_NAME_MAP.get(self.frame_num, f"Cam {self.frame_num}")
+            camera_name = CAM_NAME_MAP.get(
+                self.frame_num, f"Cam {self.frame_num}")
 
             # 檢查臉部大小是否足夠
             face_width = _box[2] - _box[0]
             min_face_threshold = self.system.state.min_face[self.frame_num]
-            
-            # --- [Two-Pass 動態門檻] ---
-            if _is_pass_2:
-                # 由於已有專屬開關管控，此處直接無條件賦予遠距小臉 (35px) 特權
-                min_face_threshold = 35
-            # --------------------------
 
             # --- 統計: 記錄人臉寬度分佈 (每 10px 為一個區間) ---
             width_bin = (face_width // 10) * 10
@@ -1201,9 +1298,10 @@ class Comparison:
 
             # 定期輸出統計摘要 (每分鐘一次，方便即時驗證)
             if now - self.last_stats_log_time > 60:
-                stats_str = ", ".join([f"{k}: {v}" for k, v in sorted(self.width_stats.items())])
+                stats_str = ", ".join(
+                    [f"{k}: {v}" for k, v in sorted(self.width_stats.items())])
                 LOGGER.info(f"[統計] [{camera_name}] 過去一分鐘人臉寬度分佈: {stats_str}")
-                self.width_stats.clear() # 重置統計
+                self.width_stats.clear()  # 重置統計
                 self.last_stats_log_time = now
             # -----------------------------------------------
 
@@ -1218,9 +1316,12 @@ class Comparison:
                 frame_to_use = _frame
                 box_to_use = list(_box)
                 points_to_use = _points.copy()
-                frame_image = Image.fromarray(cv2.cvtColor(frame_to_use, cv2.COLOR_BGR2RGB))
-                img_cropped = crop_face_without_forehead(frame_image, box_to_use, points_to_use)
-                face_embedding_list = self.system.resnet(img_cropped.unsqueeze(0))
+                frame_image = Image.fromarray(
+                    cv2.cvtColor(frame_to_use, cv2.COLOR_BGR2RGB))
+                img_cropped = crop_face_without_forehead(
+                    frame_image, box_to_use, points_to_use)
+                face_embedding_list = self.system.resnet(
+                    img_cropped.unsqueeze(0))
 
                 if face_embedding_list is not None and len(face_embedding_list) > 0:
                     current_face_vec = face_embedding_list[0].detach().numpy()
@@ -1231,7 +1332,8 @@ class Comparison:
             # 夜間強力過濾
             if is_night_mode and current_face_vec is not None:
                 if self.system.state.ann_index and self.system.state.ann_index.index is not None and self.system.state.ann_index.index.ntotal > 0:
-                    dists, _ = self.system.state.ann_index.search(current_face_vec, k=1)
+                    dists, _ = self.system.state.ann_index.search(
+                        current_face_vec, k=1)
                     if dists[0] < 0.4:
                         continue
 
@@ -1239,7 +1341,8 @@ class Comparison:
             is_staff_displaying = (
                 self.display_state['person_id'] != 'None' and
                 self.display_state['person_id'] != '__VISITOR__' and
-                (now - self.display_state['last_update'] < self.DISPLAY_STATE_HOLD_SECONDS)
+                (now - self.display_state['last_update']
+                 < self.DISPLAY_STATE_HOLD_SECONDS)
             )
 
             if face_width < min_face_threshold:
@@ -1254,72 +1357,85 @@ class Comparison:
                         saved_path = "無影像"
                         if snapshot is not None:
                             # [2026-01-30] Pass reason="SmallFace"
-                            saved_path = self._save_potential_miss_image(snapshot, face_width, min_face_threshold, camera_name, reason="SmallFace")
+                            saved_path = self._save_potential_miss_image(
+                                snapshot, face_width, min_face_threshold, camera_name, reason="SmallFace")
 
-                        LOGGER.info(f"[{camera_name}][潛在失敗] 偵測到人臉但過小 (寬度: {face_width}) - 已存檔: {saved_path}")
+                        LOGGER.info(
+                            f"[{camera_name}][潛在失敗] 偵測到人臉但過小 (寬度: {face_width}) - 已存檔: {saved_path}")
                         self.last_potential_miss_log_time = now
 
                         if not is_staff_displaying:
                             self.system.state.hint_text[self.frame_num] = "請靠近鏡頭"
                             self.hint_clear_time = now + 2.0
-                            self.system.speaker.say("請靠近鏡頭", "hint_closer", priority=2)
+                            self.system.speaker.say(
+                                "請靠近鏡頭", "hint_closer", priority=2)
 
                 continue
 
             if face_width >= CONFIG["max_face"]:
                 if not is_staff_displaying:
                     self.system.state.hint_text[self.frame_num] = "請稍微後退"
-                    self.system.speaker.say("請稍微後退", "hint_move_back", priority=2)
+                    self.system.speaker.say(
+                        "請稍微後退", "hint_move_back", priority=2)
                     self.hint_clear_time = time.time() + 1.5
                     if self.display_state['person_id'] != 'None':
                         self._update_display_state('None')
                 continue
 
             # 檢查人臉品質 (同步版)
-            quality_score, quality_msg, quality_metrics = self.check_face_quality(_box, _points, frame_w, frame_h, _gaze_status)
+            quality_score, quality_msg, quality_metrics = self.check_face_quality(
+                _box, _points, frame_w, frame_h, _gaze_status)
 
             if quality_score == 0.0:
-                 if is_staff_displaying:
-                     continue # 免死金牌
+                if is_staff_displaying:
+                    continue  # 免死金牌
 
-                 LOGGER.info(f"[{camera_name}][品質過濾] {quality_msg}")
+                LOGGER.info(f"[{camera_name}][品質過濾] {quality_msg}")
 
-                 # [2026-01-30 Feature] 潛在失敗數據收集 (大臉但被品質過濾)
-                 if face_width >= min_face_threshold and now - self.last_potential_miss_log_time > 1.0:
-                     try:
-                         snapshot = _frame
-                         if snapshot is not None:
-                             saved_path = self._save_potential_miss_image(snapshot, face_width, min_face_threshold, camera_name, reason=quality_msg)
-                             # 產生搭配的 JSON
-                             if saved_path:
-                                 self._save_potential_miss_json(saved_path, quality_metrics, quality_msg)
+                # [2026-01-30 Feature] 潛在失敗數據收集 (大臉但被品質過濾)
+                if face_width >= min_face_threshold and now - self.last_potential_miss_log_time > 1.0:
+                    try:
+                        snapshot = _frame
+                        if snapshot is not None:
+                            saved_path = self._save_potential_miss_image(
+                                snapshot, face_width, min_face_threshold, camera_name, reason=quality_msg)
+                            # 產生搭配的 JSON
+                            if saved_path:
+                                self._save_potential_miss_json(
+                                    saved_path, quality_metrics, quality_msg)
 
-                             LOGGER.info(f"[{camera_name}][品質失敗收集] 寬度 {face_width} 但品質未過 - 已存檔")
-                             self.last_potential_miss_log_time = now
-                     except Exception as e:
-                         LOGGER.error(f"Save potential miss (quality) failed: {e}")
+                            LOGGER.info(
+                                f"[{camera_name}][品質失敗收集] 寬度 {face_width} 但品質未過 - 已存檔")
+                            self.last_potential_miss_log_time = now
+                    except Exception as e:
+                        LOGGER.error(
+                            f"Save potential miss (quality) failed: {e}")
 
-                 if "低頭" in quality_msg:
-                     self.system.state.hint_text[self.frame_num] = "請抬頭"
-                     self.system.speaker.say("請抬頭", "hint_look_up", priority=2)
-                 elif "抬頭" in quality_msg:
-                     self.system.state.hint_text[self.frame_num] = "請低頭"
-                     self.system.speaker.say("請低頭", "hint_look_down", priority=2)
-                 elif "未置中" in quality_msg:
-                     self.system.state.hint_text[self.frame_num] = "請站到中間"
-                     self.system.speaker.say("請站到中間", "hint_center", priority=2)
-                 elif "斜視" in quality_msg or "未正視" in quality_msg or "側臉" in quality_msg or "影像模糊" in quality_msg:
-                     self.system.state.hint_text[self.frame_num] = "請正視鏡頭"
-                     self.system.speaker.say("請正視鏡頭", "hint_look_straight", priority=2)
-                 elif "光線直射" in quality_msg:
-                     self.system.state.hint_text[self.frame_num] = "光線直射 請遮擋"
-                     self.system.speaker.say("光線直射請遮擋", "hint_sunset", priority=2)
-                 else:
-                     self.system.state.hint_text[self.frame_num] = "請對準鏡頭"
-                     self.system.speaker.say("請對準鏡頭", "hint_occlusion", priority=2)
+                if "低頭" in quality_msg:
+                    self.system.state.hint_text[self.frame_num] = "請抬頭"
+                    self.system.speaker.say("請抬頭", "hint_look_up", priority=2)
+                elif "抬頭" in quality_msg:
+                    self.system.state.hint_text[self.frame_num] = "請低頭"
+                    self.system.speaker.say(
+                        "請低頭", "hint_look_down", priority=2)
+                elif "未置中" in quality_msg:
+                    self.system.state.hint_text[self.frame_num] = "請站到中間"
+                    self.system.speaker.say("請站到中間", "hint_center", priority=2)
+                elif "斜視" in quality_msg or "未正視" in quality_msg or "側臉" in quality_msg or "影像模糊" in quality_msg:
+                    self.system.state.hint_text[self.frame_num] = "請正視鏡頭"
+                    self.system.speaker.say(
+                        "請正視鏡頭", "hint_look_straight", priority=2)
+                elif "光線直射" in quality_msg:
+                    self.system.state.hint_text[self.frame_num] = "光線直射 請遮擋"
+                    self.system.speaker.say(
+                        "光線直射請遮擋", "hint_sunset", priority=2)
+                else:
+                    self.system.state.hint_text[self.frame_num] = "請對準鏡頭"
+                    self.system.speaker.say(
+                        "請對準鏡頭", "hint_occlusion", priority=2)
 
-                 self.hint_clear_time = now + 1.0
-                 continue
+                self.hint_clear_time = now + 1.0
+                continue
 
             if current_face_vec is None:
                 try:
@@ -1327,9 +1443,12 @@ class Comparison:
                     frame_to_use = _frame
                     box_to_use = list(_box)
                     points_to_use = _points.copy()
-                    frame_image = Image.fromarray(cv2.cvtColor(frame_to_use, cv2.COLOR_BGR2RGB))
-                    img_cropped = crop_face_without_forehead(frame_image, box_to_use, points_to_use)
-                    face_embedding_list = self.system.resnet(img_cropped.unsqueeze(0))
+                    frame_image = Image.fromarray(
+                        cv2.cvtColor(frame_to_use, cv2.COLOR_BGR2RGB))
+                    img_cropped = crop_face_without_forehead(
+                        frame_image, box_to_use, points_to_use)
+                    face_embedding_list = self.system.resnet(
+                        img_cropped.unsqueeze(0))
                     if face_embedding_list is None or len(face_embedding_list) == 0:
                         continue
                     current_face_vec = face_embedding_list[0].detach().numpy()
@@ -1337,7 +1456,7 @@ class Comparison:
                     LOGGER.error(f"[ERROR][{camera_name}] 臉部特徵提取失敗: {e}")
                     continue
             else:
-                 comparison_start_time = time.monotonic()
+                comparison_start_time = time.monotonic()
 
             try:
                 if self.system.state.ann_index is None or self.system.state.ann_index.index is None or self.system.state.ann_index.index.ntotal == 0:
@@ -1347,9 +1466,14 @@ class Comparison:
                     raw_confidence = 0.0
                     part_msg = ""
                 else:
-                    distances, faiss_person_ids = self.system.state.ann_index.search(current_face_vec, k=self.system.state.ann_index.index.ntotal)
+                    distances, faiss_person_ids = self.system.state.ann_index.search(
+                        current_face_vec, k=self.system.state.ann_index.index.ntotal)
                     if faiss_person_ids is None or len(faiss_person_ids) == 0:
-                        predicted_id = "None"; confidence = 0.0; z_score = 0.0; raw_confidence = 0.0; part_msg = ""
+                        predicted_id = "None"
+                        confidence = 0.0
+                        z_score = 0.0
+                        raw_confidence = 0.0
+                        part_msg = ""
                     else:
                         top_k_similarities = np.array(distances)
 
@@ -1373,7 +1497,8 @@ class Comparison:
 
                             s_final = s_raw * current_qs
 
-                            z = (s_raw - mean_score) / std_dev_score if std_dev_score > 0 else 0
+                            z = (s_raw - mean_score) / \
+                                std_dev_score if std_dev_score > 0 else 0
 
                             # [2026-04-15] 四象限 Z-Score 動態門檻矩陣
                             if quality_metrics.get('is_bad_pose', False):
@@ -1398,7 +1523,8 @@ class Comparison:
                         if raw_confidence >= 0.750 and final_qs < 0.99:
                             final_qs = max(final_qs, 0.99)
                         confidence = raw_confidence * final_qs
-                        z_score = (raw_confidence - mean_score) / std_dev_score if std_dev_score > 0 else 0
+                        z_score = (raw_confidence - mean_score) / \
+                            std_dev_score if std_dev_score > 0 else 0
                         part_msg = ""
                         is_in_candidates = False
 
@@ -1414,21 +1540,25 @@ class Comparison:
                         gap_threshold = 0.005 if confidence >= 0.75 or z >= 2.5 else 0.015
 
                         if gap < gap_threshold:
-                             LOGGER.info(f"[{camera_name}][Gap過濾] 分數過於接近 (Gap: {gap:.4f} < {gap_threshold}) - 拒絕辨識")
+                            LOGGER.info(
+                                f"[{camera_name}][Gap過濾] 分數過於接近 (Gap: {gap:.4f} < {gap_threshold}) - 拒絕辨識")
 
-                             # [2026-01-30 Feature] 潛在失敗數據收集 (Gap Fail)
-                             if face_width >= min_face_threshold and now - self.last_potential_miss_log_time > 1.0:
-                                 try:
-                                     snapshot = _frame
-                                     if snapshot is not None:
-                                         reason_str = f"Gap_Fail_{gap:.4f}"
-                                         saved_path = self._save_potential_miss_image(snapshot, face_width, min_face_threshold, camera_name, reason=reason_str)
-                                         if saved_path:
-                                             self._save_potential_miss_json(saved_path, quality_metrics, f"Gap Fail: {gap:.4f}")
-                                         self.last_potential_miss_log_time = now
-                                 except: pass
+                            # [2026-01-30 Feature] 潛在失敗數據收集 (Gap Fail)
+                            if face_width >= min_face_threshold and now - self.last_potential_miss_log_time > 1.0:
+                                try:
+                                    snapshot = _frame
+                                    if snapshot is not None:
+                                        reason_str = f"Gap_Fail_{gap:.4f}"
+                                        saved_path = self._save_potential_miss_image(
+                                            snapshot, face_width, min_face_threshold, camera_name, reason=reason_str)
+                                        if saved_path:
+                                            self._save_potential_miss_json(
+                                                saved_path, quality_metrics, f"Gap Fail: {gap:.4f}")
+                                        self.last_potential_miss_log_time = now
+                                except:
+                                    pass
 
-                             continue
+                            continue
 
                         # [2026-01-24 Feature] 記錄 Top-5 搜尋結果供除錯重現
                         top5_results = []
@@ -1437,7 +1567,8 @@ class Comparison:
                         for i in range(log_k):
                             pid = faiss_person_ids[i]
                             s_raw = distances[i]
-                            z = (s_raw - mean_score) / std_dev_score if std_dev_score > 0 else 0
+                            z = (s_raw - mean_score) / \
+                                std_dev_score if std_dev_score > 0 else 0
                             top5_results.append({
                                 "rank": i + 1,
                                 "id": pid,
@@ -1464,7 +1595,8 @@ class Comparison:
                             # If the winner's score is below their personal threshold,
                             # the face is more likely a stranger than a registered person.
                             if is_in_candidates:
-                                baselines = getattr(self.system.state.ann_index, 'enrollment_baselines', {})
+                                baselines = getattr(
+                                    self.system.state.ann_index, 'enrollment_baselines', {})
                                 personal_thresh = baselines.get(best_match_id)
                                 if personal_thresh is not None and raw_confidence < personal_thresh:
                                     LOGGER.info(
@@ -1483,7 +1615,8 @@ class Comparison:
                                 "full_score": float(confidence),
                                 "z_score": float(z_score),
                                 "quality_score": float(quality_score),
-                                "quality_metrics": quality_metrics, # [2026-01-30] Add metrics
+                                # [2026-01-30] Add metrics
+                                "quality_metrics": quality_metrics,
                                 "t_zone_score": None,
                                 "top5": top5_results,
                                 "embedding": current_face_vec.tolist()
@@ -1498,7 +1631,8 @@ class Comparison:
             log_time = datetime.now(
                 self.TIMEZONE).strftime('%Y-%m-%d %H:%M:%S')
 
-            staff_name = self.system.state.features_dict.get("id_name", {}).get(predicted_id, "未知")
+            staff_name = self.system.state.features_dict.get(
+                "id_name", {}).get(predicted_id, "未知")
 
             # [2026-02-09 V5 Logic] Recalculate dynamic threshold for final decision & logging
             # [2026-05-04 Fix] Use is_extreme_pose (yaw>30°) instead of is_bad_pose (yaw>25°)
@@ -1530,19 +1664,25 @@ class Comparison:
                     # [2026-01-08 Refactor] 統一使用新的打卡邏輯
                     # 傳入 check_in_out 進行防抖與方向判斷
                     # [2026-01-20 Fix] 傳入 confidence 供日誌記錄
-                    check_in_out(self.system, staff_name, predicted_id, self.frame_num, self.system.n_camera < 2, confidence)
+                    check_in_out(self.system, staff_name, predicted_id,
+                                 self.frame_num, self.system.n_camera < 2, confidence)
                     self.last_api_trigger_time[predicted_id] = now
 
                     # [2026-02-09 Fix] Sync state to trigger save_img in main.py
-                    self.system.state.same_people[self.frame_num] = float(confidence)
-                    self.system.state.same_zscore[self.frame_num] = float(z_score)
-                    self.system.state.same_width[self.frame_num] = int(face_width)
+                    self.system.state.same_people[self.frame_num] = float(
+                        confidence)
+                    self.system.state.same_zscore[self.frame_num] = float(
+                        z_score)
+                    self.system.state.same_width[self.frame_num] = int(
+                        face_width)
                     # [2026-01-24 Fix] Atomic snapshot for saving
                     if self.system.state.success_metadata[self.frame_num]:
-                        self.system.state.success_snapshot[self.frame_num] = (frame_curr.copy(), self.system.state.success_metadata[self.frame_num])
+                        self.system.state.success_snapshot[self.frame_num] = (
+                            frame_curr.copy(), self.system.state.success_metadata[self.frame_num])
                 else:
                     self._update_display_state(predicted_id)
-                    last_trigger = self.last_api_trigger_time.get(predicted_id, 0)
+                    last_trigger = self.last_api_trigger_time.get(
+                        predicted_id, 0)
                     if now - last_trigger > 3.0:
                         self.last_api_trigger_time[predicted_id] = now
 
@@ -1554,7 +1694,8 @@ class Comparison:
                                     break
                         cam_tag = "in" if _is_entry else "out"
                         try:
-                            self.system.speaker.say(f"{staff_name}{CONFIG['say'][cam_tag]}", staff_name + "_" + cam_tag, priority=1, token=predicted_id)
+                            self.system.speaker.say(
+                                f"{staff_name}{CONFIG['say'][cam_tag]}", staff_name + "_" + cam_tag, priority=1, token=predicted_id)
                         except Exception:
                             pass
 

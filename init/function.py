@@ -138,6 +138,17 @@ def check_in_out(system, staff_name, staff_id, camera_num, n, confidence):
                 LOGGER.warning(f"Unexpected camera_num {camera_num} in double-camera mode; defaulting to exit")
                 is_check_out_action = True
 
+    if (CONFIG.get("Clothes_detection", False) or CONFIG.get("Clothes_show", False)) and (n or camera_num == 0):
+        clothes_gate_ok = bool(
+            getattr(system.state, "clothes_gate_pass", False) and
+            time.time() - getattr(system.state, "clothes_gate_time", 0.0) <= 0.5
+        )
+        if not clothes_gate_ok:
+            LOGGER.info(
+                f"[服裝硬閘] staff_id={staff_id} 已辨識但未同時通過背心與安全帽，取消刷入/開門"
+            )
+            return leave
+
     LOGGER.info(f"check_in_out: staff_id={staff_id}, camera_num={camera_num}, n_single={n}, schedule_active={schedule_active}, in_action={is_check_in_action}, out_action={is_check_out_action}")
 
     # 執行簽到
