@@ -97,6 +97,14 @@ class Say_:
                     pass
                 self.current_process = None
 
+    def _fallback_voice_path(self, filename_base):
+        for suffix in ("_in", "_out", "_clothes"):
+            if filename_base.endswith(suffix):
+                path = os.path.join(self.path, f"{suffix}.mp3")
+                if os.path.isfile(path) and os.path.getsize(path) >= 100:
+                    return path
+        return None
+
     def speak(self):
         while not self.stop_threads:
             try:
@@ -119,10 +127,18 @@ class Say_:
                 full_path = os.path.join(self.path, filename)
                 
                 try:
-                    # 準備語音檔 (gTTS 生成)
+                    # Voice generation depends on the internet. Never do it in
+                    # the playback path, or offline recognition can wait on gTTS
+                    # for tens of seconds before speaking.
                     if not os.path.isfile(full_path):
-                        tts = gTTS(text=text, lang='zh-tw')
-                        tts.save(full_path)
+                        fallback_path = self._fallback_voice_path(filename_base)
+                        if fallback_path:
+                            LOGGER.warning(
+                                f"語音檔不存在，使用本地 fallback: {filename} -> {os.path.basename(fallback_path)}")
+                            full_path = fallback_path
+                        else:
+                            LOGGER.warning(f"語音檔不存在且無 fallback，略過播放: {filename}")
+                            continue
 
                     # 播放前再次檢查
                     with self.gen_lock:

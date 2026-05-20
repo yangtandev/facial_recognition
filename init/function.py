@@ -5,6 +5,7 @@ from PVMS_Library import config
 import os
 import threading
 import time
+import uuid
 import requests
 import torch
 import numpy as np
@@ -17,6 +18,9 @@ with open(os.path.join(os.path.dirname(__file__), "../config.json"), "r", encodi
     CONFIG = json.load(json_file)
 
 API = config.API(str(CONFIG["Server"]["API_url"]), int(CONFIG["Server"]["location_ID"]))
+API_QUEUE_TTL_SECONDS = 24 * 60 * 60
+API_QUEUE_PATH = os.path.abspath(os.path.join(
+    os.path.dirname(__file__), "../data/pending_api_calls.json"))
 
 def remove_old_files(directory, n=2000, m=100):
     """
@@ -444,9 +448,175 @@ def diagnose_network():
         
     return ", ".join(results)
 
+def _apply_api_success(func, result, callback=None, system=None, staff_id=None, action=None):
+    LOGGER.info(f"[{func.__name__}] 成功，取得 {result}")
+    if callback:
+        callback(result)
+
+    if system and staff_id and action:
+        now = time.time()
+        try:
+            if action == 'in':
+                system.state.check_time[staff_id] = [False, now]
+            elif action == 'out':
+                if staff_id not in system.state.check_time:
+                    system.state.check_time[staff_id] = [True, now]
+                else:
+                    system.state.check_time[staff_id][1] = now
+                threading.Timer(5, clear_leave_employee, (system, staff_id)).start()
+            LOGGER.info(f"人員 {staff_id} 狀態已在API成功後更新為 {action}")
+        except Exception as e:
+            LOGGER.error(f"API成功後更新人員 {staff_id} 狀態失敗: {e}")
+
+
+def _load_api_queue_locked():
+    if not os.path.exists(API_QUEUE_PATH):
+        return []
+    try:
+        with open(API_QUEUE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return data
+    except Exception as e:
+        LOGGER.error(f"讀取 API pending queue 失敗: {e}")
+    return []
+
+
+def _save_api_queue_locked(queue_items):
+    os.makedirs(os.path.dirname(API_QUEUE_PATH), exist_ok=True)
+    tmp_path = f"{API_QUEUE_PATH}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(queue_items, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, API_QUEUE_PATH)
+
+
+def _prune_expired_api_calls(queue_items):
+    now = time.time()
+    kept, expired = [], []
+    for item in queue_items:
+        if item.get("expires_at", 0) <= now:
+            expired.append(item)
+        else:
+            kept.append(item)
+    if expired:
+        LOGGER.warning(f"Discarded {len(expired)} expired pending API call(s).")
+    return kept
+
+
+def _resolve_api_func(func_name):
+    func = getattr(API, func_name, None)
+    if func is None:
+        raise RuntimeError(f"Unknown API function: {func_name}")
+    return func
+
+
+def _resolve_api_callback(callback_name):
+    if not callback_name:
+        return None
+    callback = globals().get(callback_name)
+    if callback is None:
+        LOGGER.warning(f"Unknown API callback ignored: {callback_name}")
+    return callback
+
+
+def _ensure_api_retry_worker(system):
+    if system is None:
+        return
+
+    if not hasattr(system, "_api_retry_lock"):
+        system._api_retry_lock = threading.Lock()
+
+    worker = getattr(system, "_api_retry_thread", None)
+    if worker and worker.is_alive():
+        return
+
+    def retry_worker():
+        LOGGER.info("Starting persistent API FIFO queue worker...")
+        while not getattr(system, "_shutdown_flag", False):
+            item = None
+            with system._api_retry_lock:
+                queue_items = _prune_expired_api_calls(_load_api_queue_locked())
+                if queue_items:
+                    queue_items.sort(key=lambda x: x.get("created_at", 0))
+                    item = queue_items[0]
+                _save_api_queue_locked(queue_items)
+
+            if item is None:
+                time.sleep(1)
+                continue
+
+            try:
+                func = _resolve_api_func(item["func_name"])
+                result = func(*tuple(item.get("args", [])))
+                if result in [201, 202]:
+                    _apply_api_success(
+                        func, result,
+                        callback=_resolve_api_callback(item.get("callback_name")),
+                        system=system,
+                        staff_id=item.get("staff_id"),
+                        action=item.get("action"),
+                    )
+                    with system._api_retry_lock:
+                        queue_items = _load_api_queue_locked()
+                        queue_items = [
+                            q for q in queue_items if q.get("id") != item.get("id")]
+                        _save_api_queue_locked(queue_items)
+                    LOGGER.info(
+                        f"[{item['func_name']}] pending API call flushed "
+                        f"(created_at={item['created_at']:.0f}, attempts={item.get('attempts', 0) + 1})")
+                    continue
+                raise RuntimeError(f"API 回傳代碼 {result} (非預期的 201 或 202)")
+            except Exception as e:
+                attempts = int(item.get("attempts", 0)) + 1
+                LOGGER.warning(
+                    f"[{item.get('func_name')}] pending API call failed, will retry: {e}")
+                with system._api_retry_lock:
+                    queue_items = _load_api_queue_locked()
+                    for q in queue_items:
+                        if q.get("id") == item.get("id"):
+                            q["attempts"] = attempts
+                            q["last_error"] = str(e)
+                            q["last_attempt_at"] = time.time()
+                            break
+                    _save_api_queue_locked(_prune_expired_api_calls(queue_items))
+                time.sleep(5)
+
+    system._api_retry_thread = threading.Thread(
+        target=retry_worker, daemon=True, name="api-retry-queue")
+    system._api_retry_thread.start()
+
+
+def _enqueue_api_retry(func, args=(), callback=None, system=None, staff_id=None, action=None):
+    if system is None:
+        return
+    _ensure_api_retry_worker(system)
+    now = time.time()
+    item = {
+        "id": uuid.uuid4().hex,
+        "func_name": func.__name__,
+        "args": list(args),
+        "callback_name": callback.__name__ if callback else None,
+        "staff_id": staff_id,
+        "action": action,
+        "created_at": now,
+        "expires_at": now + API_QUEUE_TTL_SECONDS,
+        "attempts": 0,
+        "last_error": None,
+    }
+    with system._api_retry_lock:
+        queue_items = _prune_expired_api_calls(_load_api_queue_locked())
+        queue_items.append(item)
+        queue_items.sort(key=lambda x: x.get("created_at", 0))
+        _save_api_queue_locked(queue_items)
+        queue_size = len(queue_items)
+    LOGGER.info(
+        f"[{func.__name__}] API call queued "
+        f"(staff_id={staff_id}, action={action}, queue_size={queue_size}, ttl=24h)")
+
+
 def async_api_call(func, args=(), callback=None, max_retries=20, retry_delay=0.5, system=None, staff_id=None, action=None):
     """
-    非同步執行 API 呼叫，並在成功後更新系統狀態。
+    將 API 呼叫寫入持久化 FIFO 佇列，並由背景 worker 依序送出。
     
     :param func: 要執行的函數
     :param args: 傳給函數的參數 (tuple)
@@ -457,44 +627,14 @@ def async_api_call(func, args=(), callback=None, max_retries=20, retry_delay=0.5
     :param staff_id: 要更新狀態的人員ID
     :param action: 'in' 或 'out'，決定如何更新狀態
     """
-    def task():
-        for attempt in range(1, max_retries + 1):
-            try:
-                result = func(*args)
-
-                if result in [201, 202]:
-                    LOGGER.info(f"[{func.__name__}] 成功，第 {attempt} 次取得 {result}")
-                    if callback:
-                        callback(result)
-                    
-                    # 在API成功後才更新狀態
-                    if system and staff_id and action:
-                        now = time.time()
-                        try:
-                            if action == 'in':
-                                system.state.check_time[staff_id] = [False, now]
-                            elif action == 'out':
-                                system.state.check_time[staff_id][1] = now
-                                threading.Timer(5, clear_leave_employee, (system, staff_id)).start()
-                            LOGGER.info(f"人員 {staff_id} 狀態已在API成功後更新為 {action}")
-                        except Exception as e:
-                            LOGGER.error(f"API成功後更新人員 {staff_id} 狀態失敗: {e}")
-                    return
-                else:
-                    LOGGER.warning(f"[{func.__name__}] 嘗試 {attempt} 次：API 回傳代碼 {result} (非預期的 201 或 202)")
-                    time.sleep(retry_delay)
-
-            except Exception as e:
-                LOGGER.warning(f"[{func.__name__}] 呼叫失敗，第 {attempt} 次：{e}")
-                time.sleep(retry_delay)
-
-        LOGGER.error(f"[{func.__name__}] 最多重試 {max_retries} 次仍未收到成功回應。")
-        
-        # 上傳失敗後執行網路診斷
-        network_status = diagnose_network()
-        LOGGER.error(f"[{func.__name__}] 上傳失敗網路診斷: {network_status}")
-
-    threading.Thread(target=task).start()
+    _enqueue_api_retry(
+        func,
+        args=args,
+        callback=callback,
+        system=system,
+        staff_id=staff_id,
+        action=action,
+    )
 
 def log_api_result(res):
     """
