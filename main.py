@@ -80,12 +80,12 @@ class CameraSystem:
         self.camera = VideoCapture(ip, config_data=config_data)
         self.frame_num = frame_num
         self.stop_threads = False
-        self.show_frame = np.array([])
         self.image = cv2.imread(os.path.join(
             os.path.dirname(__file__), "other/mask.png"))
         if CONFIG[CAMERA[frame_num]]["close"]:
             width = self.image.shape[1]
             self.image = self.image[0:, width // 5: 4 * width // 5]
+        self.show_frame = self.image.copy() if self.image is not None else np.array([])
         self.speak_time = 0
         self.save_img_time = {}
         self.save_name_last = ""
@@ -337,6 +337,7 @@ class CameraSystem:
 
         while not self.stop_threads:
             if self.show_frame.shape[0] == 0:
+                time.sleep(0.2)
                 continue
             try:
                 self.win.my_thread.signal_update_img.emit(
@@ -721,6 +722,18 @@ class FaceRecognitionSystem:
         except (OSError, socket.timeout):
             return False
 
+    def _is_api_available(self, timeout=3):
+        """Quick API reachability check before calling PVMS_Library helpers."""
+        api_url = CONFIG.get("Server", {}).get("API_url", "")
+        if not api_url:
+            return False
+        try:
+            requests.get(api_url, timeout=timeout)
+            return True
+        except requests.exceptions.RequestException as e:
+            LOGGER.warning(f"API unavailable, skipping today log refresh: {e}")
+            return False
+
     def _rebuild_assets(self):
         """[2026-04-24 Offline Resilience] Non-blocking, offline-safe asset rebuild.
         Skips rsync if no network. Uses incremental voice rebuild (no rmtree).
@@ -929,9 +942,20 @@ class FaceRecognitionSystem:
             LOGGER.error(f"Failed to start Web Server: {e}")
 
         self._load_features_and_profiles()
+
+        # Keep the recognition UI on the critical startup path. Network/API
+        # refreshes are best-effort and must not block window creation after
+        # an outage or partial network recovery.
+        try:
+            LOGGER.info("Setting up camera windows...")
+            self.setup_cameras()
+            LOGGER.info("Camera windows initialized.")
+        except Exception as e:
+            LOGGER.exception(f"Failed to setup camera windows: {e}")
+            raise
+
         self.setup_mqtt_client()
-        self.update_inout_log()
-        self.setup_cameras()
+        self._start_inout_log_loop()
 
         # [2026-04-24 Offline Resilience] Start background network retry loop
         self._start_network_retry_loop()
@@ -1092,8 +1116,8 @@ class FaceRecognitionSystem:
             self._load_or_build_index(force_rebuild=False)
             # [2026-02-01 Optimization] Disable unused Part Feature Generation to speed up startup
             # self._load_part_features()
-        except Exception:
-            pass
+        except Exception as e:
+            LOGGER.warning(f"Failed to load features/profiles: {e}", exc_info=True)
 
     def _load_part_features(self):
         """
@@ -1324,7 +1348,16 @@ class FaceRecognitionSystem:
             LOGGER.error(f"Failed to setup cameras: {e}")
 
     def update_inout_log(self):
+        """Refresh today's in/out state once.
+
+        This may touch the remote API through PVMS_Library. It is intentionally
+        called from a daemon worker so a slow or half-restored network cannot
+        block Qt window creation.
+        """
         try:
+            if not self._is_api_available(timeout=3):
+                return
+            LOGGER.info("Refreshing today's in/out log...")
             lj = API.Scan_today_log()
             for sid in lj.keys():
                 if lj[sid]["state"] == "enter":
@@ -1334,11 +1367,28 @@ class FaceRecognitionSystem:
                     t = threading.Timer(5, clear_leave_employee, (self, sid, ))
                     t.daemon = True
                     t.start()
-        except Exception:
-            pass
-        t = threading.Timer(300, self.update_inout_log)
-        t.daemon = True
-        t.start()
+            LOGGER.info("Today's in/out log refreshed.")
+        except Exception as e:
+            LOGGER.warning(f"Failed to refresh today's in/out log: {e}", exc_info=True)
+
+    def _start_inout_log_loop(self):
+        """Start periodic today-log refresh without blocking startup."""
+        if hasattr(self, '_inout_log_thread') and self._inout_log_thread.is_alive():
+            LOGGER.info("In/out log updater already running.")
+            return
+
+        def _worker():
+            LOGGER.info("Starting background in/out log updater (interval=300s)...")
+            while not self._shutdown_flag:
+                self.update_inout_log()
+                for _ in range(300):
+                    if self._shutdown_flag:
+                        break
+                    time.sleep(1)
+
+        self._inout_log_thread = threading.Thread(
+            target=_worker, daemon=True, name="inout-log-updater")
+        self._inout_log_thread.start()
 
     def _start_network_retry_loop(self):
         """[2026-04-24 Offline Resilience] Background thread that retries all
@@ -1414,5 +1464,6 @@ class FaceRecognitionSystem:
 if __name__ == "__main__":
     try:
         FaceRecognitionSystem().run()
-    except Exception:
+    except Exception as e:
+        LOGGER.exception(f"Fatal startup/runtime error: {e}")
         os._exit(1)

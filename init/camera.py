@@ -69,6 +69,26 @@ class VideoCapture:
         self.thread.daemon = True
         self.thread.start()
 
+    def _connect_timeout_us(self):
+        try:
+            seconds = float(self.config.get("camera_connect_timeout_sec", 5))
+        except (TypeError, ValueError):
+            seconds = 5.0
+        return str(max(1, int(seconds * 1_000_000)))
+
+    def _reconnect_delay(self):
+        try:
+            return max(1.0, float(self.config.get("camera_reconnect_delay_sec", 2)))
+        except (TypeError, ValueError):
+            return 2.0
+
+    def _rtsp_input_options(self):
+        return [
+            '-rtsp_transport', 'tcp',
+            '-rtsp_flags', 'prefer_tcp',
+            '-timeout', self._connect_timeout_us(),
+        ]
+
     def _get_video_info_for_raw_pipeline(self):
         """Uses ffprobe to get resolution needed for the raw video pipeline."""
         print("Probing video stream for resolution (for raw pipeline)...")
@@ -76,9 +96,7 @@ class VideoCapture:
             command = [
                 'ffprobe', '-v', 'error', '-select_streams', 'v:0',
                 '-show_entries', 'stream=width,height', '-of', 'csv=s=x:p=0',
-                '-rtsp_flags', 'prefer_tcp', # Ensure TCP is used for ffprobe too
-                self.rtsp_url
-            ]
+            ] + self._rtsp_input_options() + [self.rtsp_url]
             timeout = self.config.get("ffprobe_timeout") or 5  # [2026-04-24] Default 5s to prevent hang
             output = subprocess.check_output(command, text=True, stderr=subprocess.DEVNULL, timeout=timeout).strip()
             self.width, self.height = map(int, output.split('x'))
@@ -111,7 +129,8 @@ class VideoCapture:
         if fflags:
             command.extend(['-fflags', '+'.join(fflags)])
             
-        command.extend(['-rtsp_flags', 'prefer_tcp', '-flags', 'low_delay'])
+        command.extend(self._rtsp_input_options())
+        command.extend(['-flags', 'low_delay'])
 
         if use_hw_accel:
             # Add the appropriate hardware acceleration arguments if VAAPI is detected
@@ -153,7 +172,8 @@ class VideoCapture:
         print(f"Starting software MJPEG pipeline for {self.rtsp_url}...")
         command = [
             'ffmpeg', '-hide_banner', '-loglevel', 'error',
-            '-rtsp_flags', 'prefer_tcp', '-flags', 'low_delay', # [2026-01-13 Latency Fix]
+            *self._rtsp_input_options(),
+            '-flags', 'low_delay', # [2026-01-13 Latency Fix]
             '-i', self.rtsp_url,
             '-f', 'image2pipe', '-c:v', 'mjpeg', '-q:v', '2', '-'
         ]
@@ -220,8 +240,9 @@ class VideoCapture:
                     self.proc = None # Clear handle
             
             if not self.stop_threads:
-                print("Pipeline ended. Reconnecting in 5 seconds...")
-                time.sleep(5)
+                delay = self._reconnect_delay()
+                print(f"Pipeline ended. Reconnecting in {delay:g} seconds...")
+                time.sleep(delay)
 
     def read(self):
         """Retrieves the latest frame from the queue."""
