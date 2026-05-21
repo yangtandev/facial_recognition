@@ -503,6 +503,10 @@ def _prune_expired_api_calls(queue_items):
     return kept
 
 
+def _is_non_retryable_api_status(status_code):
+    return 400 <= status_code < 500 and status_code not in (408, 409, 425, 429)
+
+
 def _resolve_api_func(func_name):
     func = getattr(API, func_name, None)
     if func is None:
@@ -564,6 +568,17 @@ def _ensure_api_retry_worker(system):
                     LOGGER.info(
                         f"[{item['func_name']}] pending API call flushed "
                         f"(created_at={item['created_at']:.0f}, attempts={item.get('attempts', 0) + 1})")
+                    continue
+                if _is_non_retryable_api_status(result):
+                    with system._api_retry_lock:
+                        queue_items = _load_api_queue_locked()
+                        queue_items = [
+                            q for q in queue_items if q.get("id") != item.get("id")]
+                        _save_api_queue_locked(queue_items)
+                    LOGGER.error(
+                        f"[{item['func_name']}] discarded non-retryable API call "
+                        f"(status={result}, staff_id={item.get('staff_id')}, "
+                        f"action={item.get('action')}, args={item.get('args')})")
                     continue
                 raise RuntimeError(f"API 回傳代碼 {result} (非預期的 201 或 202)")
             except Exception as e:

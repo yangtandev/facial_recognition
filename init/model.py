@@ -186,19 +186,7 @@ class Detector:
                         # 基礎過濾 (ROI/Size)
                         w_source = new_frame.shape[1]
 
-                        # [2026-02-09 Fix] Align Face ROI with UI/Clothes Mask (35% Width)
-                        # Previous logic (1/6 ~ 5/6 = 66% width) was too wide, causing "SmallFace"
-                        # warnings when users were visually outside the UI mask.
-                        target_ratio = 0.35
-                        if CONFIG[CAMERA[self.frame_num]]["close"]:
-                            # Matches apply_mask logic (0.5 for close mode)
-                            target_ratio = 0.5
-
-                        center = w_source // 2
-                        half_w = int(w_source * target_ratio / 2)
-
-                        roi_x1 = max(0, center - half_w)
-                        roi_x2 = min(w_source, center + half_w)
+                        roi_x1, roi_x2 = self._roi_bounds(w_source)
 
                         center_x = (x1 + x2) / 2
 
@@ -436,6 +424,7 @@ class Detector:
             "vest": {"detected": False, "crop_img": None, "crop_boxes": [], "fallback_box": None},
             "zoom_enabled": bool(enable_zoom)
         }
+        roi_x1, roi_x2 = self._roi_bounds(full_frame.shape[1])
 
         fallback_cache = {}
 
@@ -518,11 +507,29 @@ class Detector:
             return result
 
         # --- Universal Spatial Validators ---
+        def is_box_roi_valid(bx1, by1, bx2, by2, require_margin=False):
+            box_cx = (bx1 + bx2) / 2
+            if box_cx < roi_x1 or box_cx > roi_x2:
+                return False, f"Reject(roi): box_cx={box_cx:.0f} outside roi=[{roi_x1},{roi_x2}]"
+
+            if require_margin:
+                roi_w = max(1, roi_x2 - roi_x1)
+                edge_margin = roi_w * 0.08
+                if bx1 <= roi_x1 + edge_margin or bx2 >= roi_x2 - edge_margin:
+                    return False, f"Reject(roi-edge): box=[{bx1},{bx2}] roi=[{roi_x1},{roi_x2}]"
+
+            return True, ""
+
         def is_helmet_valid(bx1, by1, bx2, by2, det_conf=0.0):
+            roi_valid, roi_reason = is_box_roi_valid(
+                bx1, by1, bx2, by2, require_margin=(target_face_box is None))
+            if not roi_valid:
+                return False, roi_reason
+
             if target_face_box is None:
                 # Basic relative check for missing face_box (e.g., looking down)
                 img_h, img_w = full_frame.shape[:2]
-                if by1 < img_h * 0.5 and (bx2 - bx1) > img_w * 0.05:
+                if by1 < img_h * 0.5 and (bx2 - bx1) > img_w * 0.035:
                     return True, "Passed (No Face Box, Spatial Fallback)"
                 return False, "No face box detected and not optimal helmet position"
 
@@ -557,6 +564,11 @@ class Detector:
             return True, ""
 
         def is_vest_valid(bx1, by1, bx2, by2, source="crop"):
+            roi_valid, roi_reason = is_box_roi_valid(
+                bx1, by1, bx2, by2, require_margin=(target_face_box is None))
+            if not roi_valid:
+                return False, roi_reason
+
             if target_face_box is None:
                 # Basic relative check for missing face_box
                 img_h, img_w = full_frame.shape[:2]
@@ -633,10 +645,11 @@ class Detector:
         if not helmet_found:
             fallback_results, fallback_offset, fallback_y_offset = get_fallback_results(
                 "full")
+            helmet_min_conf = 0.12 if enable_zoom else 0.20
             for det in fallback_results.boxes:
                 if int(det.cls) == 2:
                     det_conf = float(det.conf[0])
-                    if det_conf < 0.20:
+                    if det_conf < helmet_min_conf:
                         continue
                     rx1, ry1, rx2, ry2 = det.xyxy[0].cpu().numpy().astype(int)
                     gx1 = rx1 + fallback_offset
@@ -738,7 +751,10 @@ class Detector:
                 for det in fallback_results.boxes:
                     if int(det.cls) == 0:
                         det_conf = float(det.conf[0])
-                        if det_conf < 0.08:
+                        if det_conf < 0.25:
+                            if det_conf >= 0.15:
+                                print(
+                                    f"[DEBUG-VEST-FALLBACK] region={fallback_region} Reject(low_conf) conf={det_conf:.3f}")
                             continue
                         rx1, ry1, rx2, ry2 = det.xyxy[0].cpu().numpy().astype(int)
                         gx1 = rx1 + fallback_offset
@@ -815,6 +831,15 @@ class Detector:
 
         return has_vest, has_helmet
 
+    def _roi_bounds(self, width):
+        ratio = 0.35
+        if CONFIG[CAMERA[self.frame_num]]["close"]:
+            ratio = 0.5
+
+        center = width // 2
+        half_w = int(width * ratio / 2)
+        return max(0, center - half_w), min(width, center + half_w)
+
     def apply_mask(self, frame):
         """
         對輸入圖像應用水平遮罩（只保留中間區域）。
@@ -831,17 +856,7 @@ class Detector:
         height, width, _ = frame.shape
         mask = np.zeros_like(frame)
 
-        # [Fix] 使用 35% 比例 (左右各 17.5%)
-        ratio = 0.35
-        if CONFIG[CAMERA[self.frame_num]]["close"]:
-            # 近距離模式可能需要寬一點? 先維持 50% 以防萬一，或者也設為 35%
-            # 根據之前設定 (8 -> 75%)，這裡保守設為 0.5 (50%)
-            ratio = 0.5
-
-        center = width // 2
-        half_w = int(width * ratio / 2)
-        x1 = max(0, center - half_w)
-        x2 = min(width, center + half_w)
+        x1, x2 = self._roi_bounds(width)
 
         # 產生白色矩形遮罩
         cv2.rectangle(
