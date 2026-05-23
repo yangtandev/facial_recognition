@@ -668,7 +668,7 @@ class FaceRecognitionSystem:
         self.local_media_path = os.path.join(
             os.path.dirname(__file__), "media")
 
-        for d in ["descriptors", "pic_bak", "profile_pictures"]:
+        for d in ["descriptors", "pic_bak"]:
             os.makedirs(os.path.join(self.local_media_path, d), exist_ok=True)
         self.update_lock = threading.Lock()
 
@@ -1046,7 +1046,7 @@ class FaceRecognitionSystem:
                 self._generate_new_descriptors(new_files, pb, dp)
                 f, _, _, _, _ = self._load_features_from_disk()
                 self.state.features_dict = f
-                self._update_profile_pictures()
+                self._update_profile_dict()
                 self._load_or_build_index(force_rebuild=True)
         finally:
             self.update_lock.release()
@@ -1057,10 +1057,6 @@ class FaceRecognitionSystem:
                   "username": CONFIG["Server"]["username"]}
         sp, dp = os.path.join(s_dir, "pic_bak").replace(
             '\\', '/'), os.path.join(self.local_media_path, "pic_bak").replace('\\', '/')
-        if not ssh.sync_with_rsync(s_conf, sp, dp):
-            return False
-        sp, dp = os.path.join(s_dir, "profile_pictures").replace(
-            '\\', '/'), os.path.join(self.local_media_path, "profile_pictures").replace('\\', '/')
         return ssh.sync_with_rsync(s_conf, sp, dp)
 
     def _process_deleted_descriptors(self, deleted_files, descriptors_path):
@@ -1112,7 +1108,7 @@ class FaceRecognitionSystem:
         try:
             f, _, _, _, _ = self._load_features_from_disk()
             self.state.features_dict = f
-            self._update_profile_pictures()
+            self._update_profile_dict()
             self._load_or_build_index(force_rebuild=False)
             # [2026-02-01 Optimization] Disable unused Part Feature Generation to speed up startup
             # self._load_part_features()
@@ -1175,7 +1171,7 @@ class FaceRecognitionSystem:
         finally:
             mp_handler.close()
 
-    def _update_profile_pictures(self):
+    def _update_profile_dict(self):
         pb = os.path.join(self.local_media_path, "pic_bak")
         if not os.path.isdir(pb):
             self.state.profile_dict = {}
