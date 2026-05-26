@@ -873,3 +873,309 @@ def is_sunset_condition(frame, box, points):
     except Exception as e:
         LOGGER.error(f"Sunset check failed: {e}")
         return False
+
+
+def analyze_low_light(frame, box=None):
+    """
+    Measure low-light risk on face ROI when available, otherwise center ROI.
+    Uses Y channel so color cast has less impact than raw RGB/BGR means.
+    """
+    try:
+        h, w = frame.shape[:2]
+        if box is not None:
+            x1, y1, x2, y2 = map(int, box)
+            pad_x = int(max(4, (x2 - x1) * 0.12))
+            pad_y = int(max(4, (y2 - y1) * 0.12))
+            x1 = max(0, x1 - pad_x)
+            y1 = max(0, y1 - pad_y)
+            x2 = min(w, x2 + pad_x)
+            y2 = min(h, y2 + pad_y)
+            roi = frame[y1:y2, x1:x2]
+        else:
+            x1, x2 = int(w * 0.35), int(w * 0.65)
+            y1, y2 = int(h * 0.25), int(h * 0.75)
+            roi = frame[y1:y2, x1:x2]
+
+        if roi.size == 0:
+            roi = frame
+
+        y_channel = cv2.cvtColor(roi, cv2.COLOR_BGR2YCrCb)[:, :, 0]
+        mean_y = float(np.mean(y_channel))
+        std_y = float(np.std(y_channel))
+        dark_ratio = float(np.mean(y_channel < 45))
+        very_dark_ratio = float(np.mean(y_channel < 30))
+
+        too_dark = mean_y < 55 or (mean_y < 70 and dark_ratio > 0.35) or very_dark_ratio > 0.35
+        return {
+            "mean_y": mean_y,
+            "std_y": std_y,
+            "dark_ratio": dark_ratio,
+            "very_dark_ratio": very_dark_ratio,
+            "too_dark": bool(too_dark)
+        }
+    except Exception as e:
+        LOGGER.error(f"Low-light analysis failed: {e}")
+        return {
+            "mean_y": 255.0,
+            "std_y": 0.0,
+            "dark_ratio": 0.0,
+            "very_dark_ratio": 0.0,
+            "too_dark": False
+        }
+
+
+def enhance_low_light_frame(frame, gamma=0.72, clahe_clip=1.6, clahe_grid=(8, 8)):
+    """
+    Conservative low-light enhancement for recognition.
+    Only adjusts luminance (Y), preserving chroma to avoid skin-color distortion.
+    """
+    try:
+        ycrcb = cv2.cvtColor(frame, cv2.COLOR_BGR2YCrCb)
+        y, cr, cb = cv2.split(ycrcb)
+
+        table = np.array([((i / 255.0) ** gamma) * 255 for i in range(256)]).astype("uint8")
+        y_gamma = cv2.LUT(y, table)
+
+        clahe = cv2.createCLAHE(clipLimit=clahe_clip, tileGridSize=clahe_grid)
+        y_enhanced = clahe.apply(y_gamma)
+
+        # Blend with gamma result to avoid CLAHE halos/noise amplification.
+        y_final = cv2.addWeighted(y_gamma, 0.65, y_enhanced, 0.35, 0)
+        merged = cv2.merge((y_final, cr, cb))
+        return cv2.cvtColor(merged, cv2.COLOR_YCrCb2BGR)
+    except Exception as e:
+        LOGGER.error(f"Low-light enhancement failed: {e}")
+        return frame
+
+
+def analyze_backlight_glare(frame, box):
+    """
+    Detect backlight/halo glare that washes out face detail or places a bright
+    source behind a dark face. Tuned conservatively for face-recognition rejects.
+    """
+    try:
+        h, w = frame.shape[:2]
+        x1, y1, x2, y2 = map(int, box)
+        fw = max(1, x2 - x1)
+        fh = max(1, y2 - y1)
+
+        fx1, fy1 = max(0, x1), max(0, y1)
+        fx2, fy2 = min(w, x2), min(h, y2)
+        y_channel = cv2.cvtColor(frame, cv2.COLOR_BGR2YCrCb)[:, :, 0]
+        face_y = y_channel[fy1:fy2, fx1:fx2]
+        if face_y.size == 0:
+            return {"is_backlight_glare": False}
+
+        bg_x1 = max(0, x1 - int(fw * 0.8))
+        bg_x2 = min(w, x2 + int(fw * 0.8))
+        bg_y1 = max(0, y1 - int(fh * 1.2))
+        bg_y2 = min(h, y1 + int(fh * 0.2))
+        bg_y = y_channel[bg_y1:bg_y2, bg_x1:bg_x2]
+
+        face_mean = float(np.mean(face_y))
+        bg_mean = float(np.mean(bg_y)) if bg_y.size else 0.0
+        bg_bright_ratio = float(np.mean(bg_y > 210)) if bg_y.size else 0.0
+        bg_very_bright_ratio = float(np.mean(bg_y > 235)) if bg_y.size else 0.0
+        contrast = bg_mean - face_mean
+
+        face_bgr = frame[fy1:fy2, fx1:fx2]
+        face_gray = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2GRAY)
+        face_lap = float(cv2.Laplacian(face_gray, cv2.CV_64F).var())
+
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        side_x1 = max(0, x1 - int(fw * 0.95))
+        side_x2 = min(w, x2 + int(fw * 0.95))
+        side_y1 = max(0, y1 - int(fh * 0.20))
+        side_y2 = min(h, y2 + int(fh * 0.90))
+        side_y = y_channel[side_y1:side_y2, side_x1:side_x2]
+        side_s = hsv[side_y1:side_y2, side_x1:side_x2, 1]
+        side_mask = np.ones(side_y.shape, dtype=np.uint8)
+        mask_x1 = max(0, fx1 - side_x1)
+        mask_x2 = min(side_x2 - side_x1, fx2 - side_x1)
+        mask_y1 = max(0, fy1 - side_y1)
+        mask_y2 = min(side_y2 - side_y1, fy2 - side_y1)
+        if mask_x2 > mask_x1 and mask_y2 > mask_y1:
+            side_mask[mask_y1:mask_y2, mask_x1:mask_x2] = 0
+        valid_side = side_mask.astype(bool)
+        if side_y.size and np.any(valid_side):
+            side_vals = side_y[valid_side]
+            side_sat = side_s[valid_side]
+            side_hue = hsv[side_y1:side_y2, side_x1:side_x2, 0][valid_side]
+            side_hot_ratio = float(np.mean(side_vals > 245))
+            side_very_bright_ratio = float(np.mean(side_vals > 235))
+            side_saturated_bright_ratio = float(
+                np.mean((side_vals > 210) & (side_sat > 55)))
+            cyan_bright = (
+                (side_vals > 175) &
+                (side_sat > 35) &
+                (side_hue >= 75) &
+                (side_hue <= 115)
+            )
+            cyan_core = (
+                (side_vals > 210) &
+                (side_sat > 45) &
+                (side_hue >= 75) &
+                (side_hue <= 115)
+            )
+            side_cyan_bright_ratio = float(np.mean(cyan_bright))
+            side_cyan_core_ratio = float(np.mean(cyan_core))
+            cyan_core_mask = np.zeros(side_y.shape, dtype=np.uint8)
+            cyan_core_mask[valid_side] = cyan_core.astype(np.uint8)
+            num, _, stats, _ = cv2.connectedComponentsWithStats(
+                cyan_core_mask, 8)
+            largest_cyan_core = (
+                int(stats[1:, cv2.CC_STAT_AREA].max()) if num > 1 else 0)
+            side_cyan_core_component_ratio = float(
+                largest_cyan_core / max(1, np.count_nonzero(valid_side)))
+        else:
+            side_hot_ratio = 0.0
+            side_very_bright_ratio = 0.0
+            side_saturated_bright_ratio = 0.0
+            side_cyan_bright_ratio = 0.0
+            side_cyan_core_ratio = 0.0
+            side_cyan_core_component_ratio = 0.0
+
+        dark_face_bright_bg = (
+            (
+                face_mean < 60 and
+                contrast > 80 and
+                bg_very_bright_ratio > 0.095 and
+                face_lap < 80
+            ) or
+            (
+                face_mean < 70 and
+                contrast > 75 and
+                bg_very_bright_ratio > 0.085 and
+                bg_bright_ratio > 0.12 and
+                face_lap < 25
+            )
+        )
+        washed_face_glare = face_mean > 145 and face_lap < 60
+        overhead_source_glare = (
+            fw >= 280 and
+            bg_very_bright_ratio > 0.10 and
+            bg_bright_ratio > 0.18 and
+            bg_mean > 165 and
+            contrast > 65 and
+            face_mean < 115 and
+            face_lap < 30
+        )
+        side_source_glare = (
+            fw >= 280 and
+            face_mean >= 85 and
+            (
+                (
+                    side_cyan_bright_ratio > 0.012 and
+                    side_cyan_core_ratio > 0.003 and
+                    side_cyan_core_component_ratio > 0.001 and
+                    face_lap < 130
+                ) or
+                (
+                    side_cyan_bright_ratio > 0.018 and
+                    side_cyan_core_ratio > 0.0015 and
+                    side_cyan_core_component_ratio > 0.0008 and
+                    face_lap < 55
+                )
+            )
+        )
+        face_halo_glare = (
+            fw >= 280 and
+            100 <= face_mean <= 130 and
+            face_lap < 45 and
+            contrast > 25 and
+            side_cyan_bright_ratio > 0.006 and
+            side_cyan_core_component_ratio > 0.0015
+        )
+
+        return {
+            "is_backlight_glare": bool(dark_face_bright_bg or washed_face_glare or overhead_source_glare or side_source_glare or face_halo_glare),
+            "face_mean_y": face_mean,
+            "background_mean_y": bg_mean,
+            "background_bright_ratio": bg_bright_ratio,
+            "background_very_bright_ratio": bg_very_bright_ratio,
+            "background_face_contrast": float(contrast),
+            "face_laplacian": face_lap,
+            "side_hot_ratio": side_hot_ratio,
+            "side_very_bright_ratio": side_very_bright_ratio,
+            "side_saturated_bright_ratio": side_saturated_bright_ratio,
+            "side_cyan_bright_ratio": side_cyan_bright_ratio,
+            "side_cyan_core_ratio": side_cyan_core_ratio,
+            "side_cyan_core_component_ratio": side_cyan_core_component_ratio,
+            "dark_face_bright_bg": bool(dark_face_bright_bg),
+            "washed_face_glare": bool(washed_face_glare),
+            "overhead_source_glare": bool(overhead_source_glare),
+            "side_source_glare": bool(side_source_glare),
+            "face_halo_glare": bool(face_halo_glare),
+        }
+    except Exception as e:
+        LOGGER.error(f"Backlight glare analysis failed: {e}")
+        return {"is_backlight_glare": False}
+
+
+def analyze_face_blur(frame, box):
+    """Detect face blur with Laplacian plus Sobel energy, avoiding low-texture false positives."""
+    try:
+        h, w = frame.shape[:2]
+        x1, y1, x2, y2 = map(int, box)
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(w, x2), min(h, y2)
+        face = frame[y1:y2, x1:x2]
+        if face.size == 0:
+            return {"is_blur": False}
+
+        gray = cv2.cvtColor(face, cv2.COLOR_BGR2GRAY)
+        lap = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+        sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        tenengrad = float(np.mean(sobel_x * sobel_x + sobel_y * sobel_y))
+        face_w = x2 - x1
+
+        y_channel = cv2.cvtColor(frame, cv2.COLOR_BGR2YCrCb)[:, :, 0]
+        fw = max(1, x2 - x1)
+        fh = max(1, y2 - y1)
+        bg = y_channel[max(0, y1 - int(fh * 1.2)):min(h, y1 + int(fh * 0.2)),
+                       max(0, x1 - int(fw * 0.8)):min(w, x2 + int(fw * 0.8))]
+        bright_ratio = float(np.mean(bg > 210)) if bg.size else 0.0
+        very_bright_ratio = float(np.mean(bg > 235)) if bg.size else 0.0
+
+        severe_low_texture_blur = (
+            face_w < 430 and
+            lap < 20 and
+            tenengrad < 800 and
+            bright_ratio > 0.12 and
+            very_bright_ratio > 0.05
+        )
+        visible_low_texture_blur = (
+            (
+                330 <= face_w < 430 and
+                30 <= lap < 45 and
+                tenengrad < 1000 and
+                bright_ratio < 0.04 and
+                very_bright_ratio < 0.02
+            ) or
+            (
+                400 <= face_w < 470 and
+                25 <= lap < 45 and
+                tenengrad < 700 and
+                bright_ratio < 0.02 and
+                very_bright_ratio < 0.005
+            )
+        )
+        glare_smear_blur = face_w < 400 and lap < 50 and tenengrad > 1500 and very_bright_ratio > 0.15
+        blur_small_face_glare = face_w < 340 and lap < 130 and tenengrad < 1400 and very_bright_ratio > 0.20
+
+        return {
+            "is_blur": bool(severe_low_texture_blur or visible_low_texture_blur or glare_smear_blur or blur_small_face_glare),
+            "laplacian": lap,
+            "tenengrad": tenengrad,
+            "background_bright_ratio": bright_ratio,
+            "background_very_bright_ratio": very_bright_ratio,
+            "blur_mid_face": bool(severe_low_texture_blur or glare_smear_blur),
+            "severe_low_texture_blur": bool(severe_low_texture_blur),
+            "visible_low_texture_blur": bool(visible_low_texture_blur),
+            "glare_smear_blur": bool(glare_smear_blur),
+            "blur_small_face_glare": bool(blur_small_face_glare),
+        }
+    except Exception as e:
+        LOGGER.error(f"Face blur analysis failed: {e}")
+        return {"is_blur": False}

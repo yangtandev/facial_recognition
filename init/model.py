@@ -14,7 +14,15 @@ from datetime import datetime
 import pytz
 import json
 from PIL import Image
-from init.function import crop_face_without_forehead, check_in_out_qrcode, check_in_out
+from init.function import (
+    analyze_low_light,
+    analyze_backlight_glare,
+    analyze_face_blur,
+    crop_face_without_forehead,
+    enhance_low_light_frame,
+    check_in_out_qrcode,
+    check_in_out,
+)
 from init.mediapipe_handler import MediaPipeHandler
 
 
@@ -925,6 +933,7 @@ class Comparison:
         # 潛在失敗判定門檻 (min_face * ratio)
         self.potential_miss_ratio = POTENTIAL_MISS_RATIO
         self.last_potential_miss_log_time = 0  # 上次記錄潛在失敗的時間 (限流用)
+        self.last_backlight_potential_miss_log_time = 0
         self.hint_clear_time = 0             # 提示文字清除時間
         self.last_hint_speak_time = 0        # 上次播報提示語音的時間
         # ---------------------------------
@@ -999,6 +1008,10 @@ class Comparison:
         except Exception as e:
             LOGGER.error(f"儲存潛在失敗 JSON 時發生錯誤: {e}")
 
+    @staticmethod
+    def _is_backlight_quality_msg(msg):
+        return "背後光源" in msg or "BacklightGlare" in msg or "光源散射" in msg
+
     def check_face_quality(self, box, points, frame_w, frame_h, gaze_status):
         """
         評估人臉品質並計算懲罰係數。
@@ -1055,8 +1068,21 @@ class Comparison:
         if face_w > 100:
             frame_to_use = self.system.state.frame_mtcnn[self.frame_num]
             if frame_to_use is not None:
+                quality_low_light_metrics = analyze_low_light(frame_to_use, box)
+                metrics['quality_low_light'] = quality_low_light_metrics
+
                 if is_sunset_condition(frame_to_use, box, points):
                     return 0.0, "光線直射 (Sunset Mode)", metrics
+
+                backlight_metrics = analyze_backlight_glare(frame_to_use, box)
+                metrics['backlight_glare'] = backlight_metrics
+                if backlight_metrics.get("is_backlight_glare", False):
+                    return 0.0, "背後光源散射 (BacklightGlare)", metrics
+
+                blur_metrics = analyze_face_blur(frame_to_use, box)
+                metrics['face_blur'] = blur_metrics
+                if blur_metrics.get("is_blur", False):
+                    return 0.0, "影像模糊 (BlurFace)", metrics
 
         # ---------------------------------------------------------
         # 3. 3D 姿態與視線檢查 (Gaze & Pose Check) - 核心邏輯
@@ -1096,6 +1122,30 @@ class Comparison:
                 is_bad_pose = (abs(yaw) > 25 or abs(
                     pitch) > 20) or abs(roll) > 20
                 metrics['is_bad_pose'] = is_bad_pose
+
+                if abs(yaw) > 23.5 and face_w > 430:
+                    return 0.0, f"未正視鏡頭 (SideFaceGeometry Yaw:{yaw:.1f})", metrics
+
+                low_light_side_face = (
+                    metrics.get('quality_low_light', {}).get('too_dark', False) and
+                    320 <= face_w < 430 and
+                    (
+                        abs(yaw) > 25.0 or
+                        (
+                            abs(yaw) > 23.0 and
+                            abs(roll) < 6.0 and
+                            metrics.get('quality_low_light', {}).get('mean_y', 255.0) > 55.0
+                        ) or
+                        (
+                            abs(yaw) > 21.0 and
+                            abs(roll) < 6.0 and
+                            current_ear < 0.24 and
+                            metrics.get('quality_low_light', {}).get('mean_y', 255.0) > 55.0
+                        )
+                    )
+                )
+                if low_light_side_face:
+                    return 0.0, f"未正視鏡頭 (LowLightSideFace Yaw:{yaw:.1f})", metrics
 
                 if not is_looking:
                     return 0.0, f"{gaze_msg}", metrics
@@ -1161,12 +1211,12 @@ class Comparison:
         # 設定底層安全門檻 0.05 (極端閉眼)。
         # 中間地帶 (0.05~0.10) 交由 mp_handler 的 Combo Check 處理。
         # [2026-05-04 Fix v4] 兩層 EAR 過濾
-        # 層 1：EAR < 0.10 → 直接攔截（極端閉眼）
+        # 層 1：EAR < 0.11 → 直接攔截（極端閉眼）
         # 層 2：0.10 ≤ EAR < 0.15 且 v_ratio < 0.60 → 閉眼+低頭 combo
         #   根因：13;27;24 (EAR=0.139, v=0.44) 需被攔截
         #   避免誤殺：11;20;43 陳志杰 (EAR=0.12, v_ratio 正常~0.8+) 不受影響
-        if current_ear < 0.10:
-            return 0.0, f"眼睛閉合 (EAR: {current_ear:.4f} < 0.10)", metrics
+        if current_ear < 0.11:
+            return 0.0, f"眼睛閉合 (EAR: {current_ear:.4f} < 0.11)", metrics
         if current_ear < 0.15 and v_ratio < 0.60:
             return 0.0, f"眼睛閉合+低頭 (EAR: {current_ear:.4f} < 0.15 & V-Ratio: {v_ratio:.2f} < 0.60)", metrics
 
@@ -1306,6 +1356,9 @@ class Comparison:
             # 檢查臉部大小是否足夠
             face_width = _box[2] - _box[0]
             min_face_threshold = self.system.state.min_face[self.frame_num]
+            low_light_metrics = analyze_low_light(_frame, _box)
+            low_light_enhanced = bool(low_light_metrics.get("too_dark", False))
+            recognition_frame = enhance_low_light_frame(_frame) if low_light_enhanced else _frame
 
             # --- 統計: 記錄人臉寬度分佈 (每 10px 為一個區間) ---
             width_bin = (face_width // 10) * 10
@@ -1328,7 +1381,7 @@ class Comparison:
             # 提取特徵向量 (為了夜間檢查或後續辨識)
             current_face_vec = None
             try:
-                frame_to_use = _frame
+                frame_to_use = recognition_frame
                 box_to_use = list(_box)
                 points_to_use = _points.copy()
                 frame_image = Image.fromarray(
@@ -1400,20 +1453,36 @@ class Comparison:
             # 檢查人臉品質 (同步版)
             quality_score, quality_msg, quality_metrics = self.check_face_quality(
                 _box, _points, frame_w, frame_h, _gaze_status)
+            quality_metrics["low_light"] = low_light_metrics
+            quality_metrics["low_light_enhanced"] = low_light_enhanced
 
             if quality_score == 0.0:
-                if is_staff_displaying:
-                    continue  # 免死金牌
-
                 LOGGER.info(f"[{camera_name}][品質過濾] {quality_msg}")
 
                 # [2026-01-30 Feature] 潛在失敗數據收集 (大臉但被品質過濾)
-                if face_width >= min_face_threshold and now - self.last_potential_miss_log_time > 1.0:
+                is_backlight_quality = self._is_backlight_quality_msg(
+                    quality_msg)
+                potential_threshold = min_face_threshold * self.potential_miss_ratio
+                should_save_backlight = (
+                    is_backlight_quality and
+                    face_width >= potential_threshold and
+                    now - self.last_backlight_potential_miss_log_time > 1.0
+                )
+                should_save_quality = (
+                    not is_backlight_quality and
+                    face_width >= min_face_threshold and
+                    now - self.last_potential_miss_log_time > 1.0
+                )
+                if should_save_backlight or should_save_quality:
                     try:
                         snapshot = _frame
                         if snapshot is not None:
+                            save_reason = (
+                                "BacklightGlare_背後光源過強"
+                                if is_backlight_quality else quality_msg
+                            )
                             saved_path = self._save_potential_miss_image(
-                                snapshot, face_width, min_face_threshold, camera_name, reason=quality_msg)
+                                snapshot, face_width, min_face_threshold, camera_name, reason=save_reason)
                             # 產生搭配的 JSON
                             if saved_path:
                                 self._save_potential_miss_json(
@@ -1421,10 +1490,16 @@ class Comparison:
 
                             LOGGER.info(
                                 f"[{camera_name}][品質失敗收集] 寬度 {face_width} 但品質未過 - 已存檔")
-                            self.last_potential_miss_log_time = now
+                            if is_backlight_quality:
+                                self.last_backlight_potential_miss_log_time = now
+                            else:
+                                self.last_potential_miss_log_time = now
                     except Exception as e:
                         LOGGER.error(
                             f"Save potential miss (quality) failed: {e}")
+
+                if is_staff_displaying:
+                    continue  # 免死金牌
 
                 if "低頭" in quality_msg:
                     self.system.state.hint_text[self.frame_num] = "請抬頭"
@@ -1444,6 +1519,10 @@ class Comparison:
                     self.system.state.hint_text[self.frame_num] = "光線直射 請遮擋"
                     self.system.speaker.say(
                         "光線直射請遮擋", "hint_sunset", priority=2)
+                elif "背後光源" in quality_msg or "BacklightGlare" in quality_msg:
+                    self.system.state.hint_text[self.frame_num] = "請遮擋背後光源"
+                    self.system.speaker.say(
+                        "請遮擋背後光源", "hint_backlight", priority=2)
                 else:
                     self.system.state.hint_text[self.frame_num] = "請對準鏡頭"
                     self.system.speaker.say(
@@ -1455,7 +1534,7 @@ class Comparison:
             if current_face_vec is None:
                 try:
                     comparison_start_time = time.monotonic()
-                    frame_to_use = _frame
+                    frame_to_use = recognition_frame
                     box_to_use = list(_box)
                     points_to_use = _points.copy()
                     frame_image = Image.fromarray(
@@ -1516,7 +1595,7 @@ class Comparison:
                                 std_dev_score if std_dev_score > 0 else 0
 
                             # [2026-04-15] 四象限 Z-Score 動態門檻矩陣
-                            if quality_metrics.get('is_bad_pose', False):
+                            if quality_metrics.get('is_extreme_pose', False):
                                 required_conf = 0.65 if z >= 2.5 else 0.85
                             else:
                                 required_conf = 0.65 if z >= 2.5 else 0.70
@@ -1552,7 +1631,20 @@ class Comparison:
                         # Dynamic Threshold Formula
                         # 如果信心度極高 (>0.80)，容忍較小的 Gap (0.02)
                         # 否則需要較大的 Gap (0.03) 以確保安全
-                        gap_threshold = 0.005 if confidence >= 0.75 or z >= 2.5 else 0.015
+                        gap_threshold = 0.005 if confidence >= 0.75 or z_score >= 2.5 else 0.015
+                        face_blur_metrics = quality_metrics.get('face_blur', {})
+                        low_texture_face = (
+                            face_blur_metrics.get('laplacian', 999) < 30 and
+                            face_blur_metrics.get('tenengrad', 99999) < 900
+                        )
+                        low_texture_ambiguous = low_texture_face and (
+                            (gap < 0.05 and z_score < 1.8) or
+                            (face_width > 500 and confidence < 0.80 and gap < 0.08)
+                        )
+                        if low_texture_ambiguous:
+                            gap_threshold = max(
+                                gap_threshold, 0.08 if face_width > 500 else 0.05)
+                            quality_metrics['low_texture_ambiguous'] = True
 
                         if gap < gap_threshold:
                             LOGGER.info(
@@ -1620,6 +1712,24 @@ class Comparison:
                                     )
                                     is_in_candidates = False
                                     best_match_id = '__VISITOR__'
+                        else:
+                            # Recover stable medium-confidence matches that were rejected only by
+                            # the 0.70 confidence gate, while still requiring clear separation.
+                            baselines = getattr(
+                                self.system.state.ann_index, 'enrollment_baselines', {})
+                            personal_thresh = baselines.get(best_match_id)
+                            relaxed_high_z_accept = (
+                                best_match_id not in ("None", "__VISITOR__") and
+                                not quality_metrics.get('is_bad_pose', False) and
+                                confidence >= 0.68 and
+                                z_score >= 2.1 and
+                                gap >= 0.05 and
+                                (personal_thresh is None or raw_confidence >= personal_thresh)
+                            )
+                            if relaxed_high_z_accept:
+                                is_in_candidates = True
+                                quality_metrics['relaxed_high_z_accept'] = True
+                                part_msg += " [RelaxedHighZ]"
                         predicted_id = best_match_id
 
                         # [2026-01-24 Feature] 建立完整的 Snapshot Metadata (供離線重現測試)
@@ -1658,6 +1768,8 @@ class Comparison:
                 final_required_conf = 0.65 if z_score >= 2.5 else 0.85
             else:
                 final_required_conf = 0.65 if z_score >= 2.5 else 0.70
+            if quality_metrics.get('relaxed_high_z_accept', False):
+                final_required_conf = min(final_required_conf, 0.68)
 
             # [2026-01-11 Fix] 補回遺漏的 Log 訊息定義
             quality_rating = "Low Confidence"
@@ -1668,7 +1780,9 @@ class Comparison:
                     quality_rating = "Ambiguous (Low Z)"
 
             # Log output to file
+            light_msg = " [LowLightEnhanced]" if low_light_enhanced else ""
             log_msg = f"[{camera_name}] ID: {predicted_id} ({staff_name}), Score: {confidence:.2f}/{final_required_conf:.2f} (Raw:{raw_confidence:.2f}), Z: {z_score:.2f}, Q: {quality_score:.2f} [{quality_rating}]{part_msg}"
+            log_msg += light_msg
             LOGGER.info(log_msg)
 
             if is_in_candidates and predicted_id != "None" and confidence >= final_required_conf and z_score >= Z_SCORE_THRESHOLD:

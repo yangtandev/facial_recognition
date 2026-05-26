@@ -268,8 +268,8 @@ class MediaPipeHandler:
         gaze_diff = abs(l_h - r_h)
 
         # 4. 眼睛視線判定 (斜視 - 瞬時攔截)
-        # [2026-01-26 Enable] 恢復斜視過濾，門檻放寬至 0.20 以攔截嚴重特徵錯位
-        if gaze_diff > 0.20 or not (0.25 < s_avg_h < 0.75):
+        # [2026-05-26] Diff 0.20~0.23 can still be frontal and recognizable.
+        if gaze_diff > 0.23 or not (0.25 < s_avg_h < 0.75):
             return False, f"斜視 (Diff: {gaze_diff:.2f})", pose_tuple, ear
             
         # [2026-01-26 New] 組合過濾 (Combo Check)
