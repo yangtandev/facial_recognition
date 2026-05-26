@@ -643,12 +643,7 @@ class Detector:
                             details["helmet"]["detected"] = True
                             detections.append((2, [gx1, gy1, gx2, gy2]))
                             helmet_found = True
-                            # print(
-                            #     f"[DEBUG-HELMET-CROP] PASS conf={det_conf:.3f}")
                             break
-                        # else:
-                        #     print(
-                        #         f"[DEBUG-HELMET-CROP] {reason} conf={det_conf:.3f}")
 
         # 1.2 Fallback YOLO + Spatial Overlap
         if not helmet_found:
@@ -675,12 +670,7 @@ class Detector:
                             gx1, gy1, gx2, gy2]
                         details["helmet"]["conf"] = det_conf
                         detections.append((2, [gx1, gy1, gx2, gy2]))
-                        print(
-                            f"[DEBUG-HELMET-FALLBACK] PASS conf={det_conf:.3f}")
                         break
-                    else:
-                        print(
-                            f"[DEBUG-HELMET-FALLBACK] {reason} conf={det_conf:.3f}")
 
         vest_found = False
 
@@ -703,8 +693,6 @@ class Detector:
                 body_crop, cx, cy = self._crop_body_pose(
                     full_frame, pose_res.pose_landmarks)
             else:
-                print(
-                    f"[DEBUG-VEST-POSE] Skipping pose: nose_x={nose_x} outside face_box=[{fx1},{fx2}]")
                 self._last_pose_lm = None
                 body_crop = None
 
@@ -728,8 +716,6 @@ class Detector:
                             detections.append((0, [gx1, gy1, gx2, gy2]))
                             vest_found = True
                             break
-                        # else:
-                        #     print(f"[DEBUG-VEST-CROP] {reason}")
 
         # 2.2 Fallback YOLO + Spatial Overlap
         if not vest_found:
@@ -761,9 +747,6 @@ class Detector:
                     if int(det.cls) == 0:
                         det_conf = float(det.conf[0])
                         if det_conf < 0.25:
-                            if det_conf >= 0.15:
-                                print(
-                                    f"[DEBUG-VEST-FALLBACK] region={fallback_region} Reject(low_conf) conf={det_conf:.3f}")
                             continue
                         rx1, ry1, rx2, ry2 = det.xyxy[0].cpu().numpy().astype(int)
                         gx1 = rx1 + fallback_offset
@@ -781,9 +764,6 @@ class Detector:
                                     "conf": det_conf,
                                     "region": fallback_region,
                                 }
-                        else:
-                            print(
-                                f"[DEBUG-VEST-FALLBACK] region={fallback_region} {reason} conf={det_conf:.3f}")
             if best_vest is not None:
                 details["vest"]["detected"] = True
                 details["vest"]["fallback_box"] = best_vest["box"]
@@ -791,8 +771,6 @@ class Detector:
                 details["vest"]["conf"] = best_vest["conf"]
                 detections.append((0, best_vest["box"]))
                 vest_found = True
-                print(
-                    f"[DEBUG-VEST-FALLBACK] BEST region={best_vest['region']} conf={best_vest['conf']:.3f}")
 
         # Update State
         if details["helmet"]["detected"]:
