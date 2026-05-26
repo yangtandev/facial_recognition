@@ -39,6 +39,7 @@ sim_rescue*.txt
 
 # --- Agents ---
 .agents/
+skills-lock.json
 
 # --- Testing ---
 tests/
