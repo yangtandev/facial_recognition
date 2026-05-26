@@ -4,6 +4,7 @@ from gtts import gTTS
 import os, threading
 import queue
 import subprocess
+import shutil
 from init.log import LOGGER
 
 class Say_:
@@ -22,6 +23,9 @@ class Say_:
 
         self.path = os.path.join(os.path.dirname(__file__), "../voice/")
         self.stop_threads = False
+        self.playback_timeout_sec = 3.0
+        self.playback_error_cooldown_sec = 5.0
+        self.last_playback_failure_time = 0.0
         
         # 追蹤當前播放進程
         self.current_process = None
@@ -105,6 +109,66 @@ class Say_:
                     return path
         return None
 
+    def _player_commands(self, full_path):
+        commands = []
+        if shutil.which("ffplay"):
+            commands.append((
+                "ffplay",
+                ["ffplay", "-nodisp", "-autoexit", "-hide_banner", "-loglevel", "error", full_path],
+            ))
+        if shutil.which("mpg123"):
+            commands.append(("mpg123", ["mpg123", "-q", full_path]))
+        return commands
+
+    def _play_file(self, full_path):
+        now = time.time()
+        if now - self.last_playback_failure_time < self.playback_error_cooldown_sec:
+            LOGGER.warning(
+                f"語音播放略過: 前次播放器失敗，冷卻 {self.playback_error_cooldown_sec:.0f}s 中")
+            return False
+
+        last_error = ""
+        for player_name, cmd in self._player_commands(full_path):
+            try:
+                LOGGER.info(f"語音播放開始: {os.path.basename(full_path)} ({player_name})")
+                with self.process_lock:
+                    self.current_process = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE,
+                    )
+
+                try:
+                    _, stderr = self.current_process.communicate(
+                        timeout=self.playback_timeout_sec)
+                except subprocess.TimeoutExpired:
+                    self._kill_current_process()
+                    last_error = f"{player_name} timeout after {self.playback_timeout_sec:.1f}s"
+                    LOGGER.warning(f"語音播放逾時，改試下一個播放器: {last_error}")
+                    continue
+
+                return_code = self.current_process.returncode
+                if return_code == 0:
+                    LOGGER.info(f"語音播放完成: {os.path.basename(full_path)} ({player_name})")
+                    return True
+
+                err_text = ""
+                if stderr:
+                    err_text = stderr.decode("utf-8", errors="ignore").strip().splitlines()
+                    err_text = " | ".join(err_text[-3:])
+                last_error = f"{player_name} exit={return_code} {err_text}".strip()
+                LOGGER.warning(f"語音播放器失敗，改試下一個: {last_error}")
+            except Exception as e:
+                last_error = f"{player_name} exception: {e}"
+                LOGGER.warning(f"語音播放器例外，改試下一個: {last_error}")
+            finally:
+                with self.process_lock:
+                    self.current_process = None
+
+        LOGGER.error(f"語音播放失敗，沒有可用播放器或音訊設備不可用: {last_error}")
+        self.last_playback_failure_time = time.time()
+        return False
+
     def speak(self):
         while not self.stop_threads:
             try:
@@ -146,18 +210,7 @@ class Say_:
 
                     if os.path.getsize(full_path) < 100: continue
 
-                    # --- 使用系統 ffplay 播放 (取代不穩定的 mpg123) ---
-                    # [2026-02-01 Fix] mpg123 segfaults in systemd environment (Code -11)
-                    # ffplay is more robust.
-                    with self.process_lock:
-                        self.current_process = subprocess.Popen(
-                            ['ffplay', '-nodisp', '-autoexit', '-hide_banner', full_path],
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL
-                        )
-                    
-                    # 等待播放完成或被殺死
-                    self.current_process.wait()
+                    self._play_file(full_path)
                     
                 except Exception as e:
                     LOGGER.error(f"播放進程發生錯誤: {e}")
@@ -166,10 +219,6 @@ class Say_:
                     if token:
                         with self.status_lock: self.last_end_time[token] = time.time()
                     
-                    # 釋放資源
-                    with self.process_lock:
-                        self.current_process = None
-
                     if self.queue.empty():
                         with self.priority_lock:
                             self.current_priority = 0

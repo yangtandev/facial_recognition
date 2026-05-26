@@ -151,13 +151,14 @@ class Detector:
         last_points = None
         last_time = 0
         last_detection_time = 0
-        DETECTION_INTERVAL = self.system.state.detection_interval
         dummy_input = tensor_test_img[0]
 
         while not self.stop_threads:
             now = time.time()
             if self.system.state.frame[self.frame_num] is not None:
-                if now - last_detection_time > DETECTION_INTERVAL:
+                detection_interval = max(
+                    0.01, float(self.system.state.detection_interval))
+                if now - last_detection_time > detection_interval:
                     last_detection_time = now
 
                     self.system.state.max_box[self.frame_num] = last_box

@@ -61,6 +61,17 @@ os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = QLibraryInfo.location(
 font_path = os.path.join(os.path.dirname(
     __file__), "other/NotoSansTC-VariableFont_wght.ttf")
 CAMERA = {0: "inCamera", 1: "outCamera"}
+HINT_VOICE_TEXTS = {
+    "hint_closer": "請靠近鏡頭",
+    "hint_move_back": "請稍微後退",
+    "hint_look_up": "請抬頭",
+    "hint_look_down": "請低頭",
+    "hint_center": "請站到中間",
+    "hint_look_straight": "請正視鏡頭",
+    "hint_sunset": "光線直射請遮擋",
+    "hint_backlight": "請遮擋背後光源",
+    "hint_occlusion": "請對準鏡頭",
+}
 
 
 def put_chinese_text(img, text, position, font_path, font_size, color, background=True):
@@ -811,6 +822,8 @@ class FaceRecognitionSystem:
         for key, val in CONFIG.get("say", {}).items():
             txt = val.replace("name_", "") if "name_" in val else val
             generic_texts[key] = txt
+        hint_texts = dict(HINT_VOICE_TEXTS)
+        hint_texts["hint_clothes"] = generic_texts.get("clothes", "請正確著裝")
 
         names = set()
         for f in os.listdir(pb):
@@ -825,6 +838,11 @@ class FaceRecognitionSystem:
         tasks = []
         for key, txt in generic_texts.items():
             fn = f"_{key}.mp3"
+            expected_files.add(fn)
+            if not os.path.isfile(os.path.join(vp, fn)):
+                tasks.append((fn, txt))
+        for key, txt in hint_texts.items():
+            fn = f"{key}.mp3"
             expected_files.add(fn)
             if not os.path.isfile(os.path.join(vp, fn)):
                 tasks.append((fn, txt))
@@ -898,8 +916,8 @@ class FaceRecognitionSystem:
         for _ in range(5):
             self.resnet(ts)
         rt = (time.time() - t0) / 5
-        self.state.detection_interval = max(0.066, min(0.5, dt * 2.0))
-        self.state.comparison_interval = max(0.066, min(0.5, rt * 1.5))
+        self.state.detection_interval = max(0.10, min(0.5, dt * 2.0))
+        self.state.comparison_interval = max(0.10, min(0.5, rt * 1.5))
         LOGGER.info(
             f"Auto-Tuning: Det {1/self.state.detection_interval:.1f} FPS, Rec {1/self.state.comparison_interval:.1f} FPS")
 
