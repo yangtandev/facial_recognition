@@ -20,6 +20,10 @@ from init.function import (
     analyze_face_blur,
     crop_face_without_forehead,
     enhance_low_light_frame,
+    frame_hash,
+    file_tree_stat_hash,
+    git_head_commit,
+    stable_json_hash,
     check_in_out_qrcode,
     check_in_out,
 )
@@ -51,6 +55,7 @@ CAMERA = {0: "inCamera", 1: "outCamera"}
 CAM_NAME_MAP = {0: "入口", 1: "出口"}
 POTENTIAL_MISS_RATIO = 0.8
 Z_SCORE_THRESHOLD = 1.5
+QUALITY_RULE_VERSION = "2026-05-28.1"
 
 test_img = cv2.imread(os.path.join(
     os.path.dirname(__file__), "../other/test_img.jpg"))
@@ -74,6 +79,7 @@ class Detector:
         self.stop_threads = False
         self.last_face_time = 0
         self.last_no_face_log_time = 0
+        self.frame_packet_id = 0
         self.clothe_time = [0.0, 0.0, 0.0]
         # Vest at distance is more prone to intermittent YOLO misses than helmet.
         # Hold recent valid detections briefly so a standing user does not flicker out.
@@ -301,8 +307,14 @@ class Detector:
                         self.system.state.head_pose[self.frame_num] = g_pose
 
                         g_status = self.system.state.gaze_status[self.frame_num]
+                        self.frame_packet_id += 1
+                        packet_meta = {
+                            "frame_id": self.frame_packet_id,
+                            "captured_at": datetime.now(self.TIMEZONE).isoformat(),
+                            "shape": list(new_frame.shape),
+                        }
                         self.system.state.frame_data[self.frame_num] = (
-                            new_frame, g_status, box, points, legacy_face_zoom_flag)
+                            new_frame, g_status, box, points, legacy_face_zoom_flag, packet_meta)
                     else:
                         self.system.state.gaze_status[self.frame_num] = None
                         self.system.state.head_pose[self.frame_num] = None
@@ -918,8 +930,57 @@ class Comparison:
         # ---------------------------------
 
         self.TIMEZONE = pytz.timezone('Asia/Taipei')
+        self.repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
         threading.Thread(target=self.face_comparison, daemon=True).start()
+
+    def _runtime_version_metadata(self):
+        descriptor_dir = os.path.join(self.repo_root, "media", "descriptors")
+        return {
+            "quality_rule_version": QUALITY_RULE_VERSION,
+            "config_hash": stable_json_hash(CONFIG),
+            "descriptor_hash": file_tree_stat_hash(descriptor_dir),
+            "code_commit": git_head_commit(self.repo_root),
+        }
+
+    def _success_gate_passes_before_action(self, metadata, frame=None):
+        if not isinstance(metadata, dict):
+            LOGGER.warning(
+                f"[SuccessGateFail] camera={self.frame_num}, reason=MetadataMissingBeforeAction")
+            return False
+        required_fields = [
+            "quality_rule_version",
+            "config_hash",
+            "descriptor_hash",
+            "decision_frame_hash",
+            "quality_score",
+            "quality_msg",
+        ]
+        missing = [field for field in required_fields if not metadata.get(field)]
+        if missing:
+            LOGGER.warning(
+                f"[SuccessGateFail] camera={self.frame_num}, reason=MetadataIncompleteBeforeAction, missing={missing}")
+            return False
+        try:
+            quality_score = float(metadata.get("quality_score", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            quality_score = 0.0
+        quality_msg = str(metadata.get("quality_msg", ""))
+        if quality_score <= 0.0 or quality_msg != "Pass":
+            LOGGER.warning(
+                f"[SuccessGateFail] camera={self.frame_num}, reason=QualityNotPassBeforeAction, "
+                f"quality_score={quality_score}, quality_msg={quality_msg}")
+            return False
+        if frame is not None:
+            current_hash = frame_hash(frame)
+            decision_hash = str(metadata.get("decision_frame_hash", ""))
+            if not current_hash or current_hash != decision_hash:
+                LOGGER.warning(
+                    f"[SuccessGateFail] camera={self.frame_num}, reason=SnapshotMismatchBeforeAction, "
+                    f"frame_id={metadata.get('frame_id')}, decision_hash={decision_hash[:12]}, "
+                    f"current_hash={current_hash[:12]}")
+                return False
+        return True
 
     def _save_potential_miss_image(self, frame, width, threshold, camera_name, reason="Unknown"):
         """
@@ -957,7 +1018,7 @@ class Comparison:
             LOGGER.error(f"儲存潛在失敗截圖時發生錯誤: {e}")
             return None
 
-    def _save_potential_miss_json(self, image_path, metrics, msg):
+    def _save_potential_miss_json(self, image_path, metrics, msg, frame=None, packet_meta=None, box=None):
         """
         [2026-01-30 Feature] 為潛在失敗截圖產生搭配的 JSON 檔。
         """
@@ -969,6 +1030,14 @@ class Comparison:
                 "reason": msg,
                 "metrics": metrics
             }
+            if packet_meta:
+                data["frame_id"] = packet_meta.get("frame_id")
+                data["frame_captured_at"] = packet_meta.get("captured_at")
+                data["frame_shape"] = packet_meta.get("shape")
+            if frame is not None:
+                data["decision_frame_hash"] = frame_hash(frame)
+            if box is not None:
+                data["face_box"] = [int(v) for v in box]
 
             # [2026-03-10 Fix] Add default converter for numpy types to prevent truncation
             def _default_converter(o):
@@ -1316,7 +1385,11 @@ class Comparison:
             if now > self.hint_clear_time:
                 self.system.state.hint_text[self.frame_num] = ""
 
-            _frame, _gaze_status, _box, _points, _legacy_face_zoom_flag = data_package
+            if len(data_package) >= 6:
+                _frame, _gaze_status, _box, _points, _legacy_face_zoom_flag, _packet_meta = data_package[:6]
+            else:
+                _frame, _gaze_status, _box, _points, _legacy_face_zoom_flag = data_package
+                _packet_meta = {}
 
             # 使用解包出來的 frame，而不是去讀可能已經被覆蓋的 system.state.frame_mtcnn
             # 為了相容其他可能讀取這欄位的地方(如UI?)
@@ -1406,6 +1479,14 @@ class Comparison:
                             # [2026-01-30] Pass reason="SmallFace"
                             saved_path = self._save_potential_miss_image(
                                 snapshot, face_width, min_face_threshold, camera_name, reason="SmallFace")
+                            if saved_path:
+                                small_metrics = {
+                                    "face_width_px": float(face_width),
+                                    "min_face_threshold": float(min_face_threshold),
+                                }
+                                self._save_potential_miss_json(
+                                    saved_path, small_metrics, "SmallFace",
+                                    frame=snapshot, packet_meta=_packet_meta, box=_box)
 
                         LOGGER.info(
                             f"[{camera_name}][潛在失敗] 偵測到人臉但過小 (寬度: {face_width}) - 已存檔: {saved_path}")
@@ -1465,7 +1546,8 @@ class Comparison:
                             # 產生搭配的 JSON
                             if saved_path:
                                 self._save_potential_miss_json(
-                                    saved_path, quality_metrics, quality_msg)
+                                    saved_path, quality_metrics, quality_msg,
+                                    frame=snapshot, packet_meta=_packet_meta, box=_box)
 
                             LOGGER.info(
                                 f"[{camera_name}][品質失敗收集] 寬度 {face_width} 但品質未過 - 已存檔")
@@ -1639,7 +1721,8 @@ class Comparison:
                                             snapshot, face_width, min_face_threshold, camera_name, reason=reason_str)
                                         if saved_path:
                                             self._save_potential_miss_json(
-                                                saved_path, quality_metrics, f"Gap Fail: {gap:.4f}")
+                                                saved_path, quality_metrics, f"Gap Fail: {gap:.4f}",
+                                                frame=snapshot, packet_meta=_packet_meta, box=_box)
                                         self.last_potential_miss_log_time = now
                                 except:
                                     pass
@@ -1715,10 +1798,17 @@ class Comparison:
                         if current_face_vec is not None:
                             meta = {
                                 "timestamp": datetime.now(self.TIMEZONE).isoformat(),
+                                **self._runtime_version_metadata(),
+                                "frame_id": _packet_meta.get("frame_id"),
+                                "frame_captured_at": _packet_meta.get("captured_at"),
+                                "frame_shape": _packet_meta.get("shape"),
+                                "decision_frame_hash": frame_hash(frame_curr),
+                                "face_box": [int(v) for v in _box],
                                 "predicted_id": best_match_id,
                                 "full_score": float(confidence),
                                 "z_score": float(z_score),
                                 "quality_score": float(quality_score),
+                                "quality_msg": quality_msg,
                                 # [2026-01-30] Add metrics
                                 "quality_metrics": quality_metrics,
                                 "t_zone_score": None,
@@ -1766,6 +1856,15 @@ class Comparison:
 
             if is_in_candidates and predicted_id != "None" and confidence >= final_required_conf and z_score >= Z_SCORE_THRESHOLD:
                 if self.system.state.same_class[self.frame_num] != predicted_id:
+                    success_meta = self.system.state.success_metadata[self.frame_num]
+                    if not self._success_gate_passes_before_action(success_meta, frame_curr):
+                        self.system.state.same_people[self.frame_num] = 0.0
+                        self.system.state.success_snapshot[self.frame_num] = None
+                        self.system.state.success_metadata[self.frame_num] = None
+                        continue
+                    self.system.state.success_snapshot[self.frame_num] = (
+                        frame_curr.copy(), success_meta)
+
                     self._update_display_state(predicted_id)
 
                     # 辨識成功，播放音效與打卡
@@ -1783,10 +1882,6 @@ class Comparison:
                         z_score)
                     self.system.state.same_width[self.frame_num] = int(
                         face_width)
-                    # [2026-01-24 Fix] Atomic snapshot for saving
-                    if self.system.state.success_metadata[self.frame_num]:
-                        self.system.state.success_snapshot[self.frame_num] = (
-                            frame_curr.copy(), self.system.state.success_metadata[self.frame_num])
                 else:
                     self._update_display_state(predicted_id)
                     last_trigger = self.last_api_trigger_time.get(

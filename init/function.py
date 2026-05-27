@@ -1,5 +1,6 @@
 
 import datetime
+import hashlib
 import json
 from PVMS_Library import config
 import os
@@ -21,6 +22,72 @@ API = config.API(str(CONFIG["Server"]["API_url"]), int(CONFIG["Server"]["locatio
 API_QUEUE_TTL_SECONDS = 24 * 60 * 60
 API_QUEUE_PATH = os.path.abspath(os.path.join(
     os.path.dirname(__file__), "../data/pending_api_calls.json"))
+
+
+def frame_hash(frame):
+    """Return a stable hash for a concrete frame array."""
+    if frame is None:
+        return ""
+    try:
+        arr = np.ascontiguousarray(frame)
+        h = hashlib.sha256()
+        h.update(str(arr.shape).encode("utf-8"))
+        h.update(str(arr.dtype).encode("utf-8"))
+        h.update(arr.tobytes())
+        return h.hexdigest()
+    except Exception as exc:
+        LOGGER.warning(f"frame_hash failed: {exc}")
+        return ""
+
+
+def stable_json_hash(data):
+    """Hash JSON-like data with stable key order."""
+    try:
+        payload = json.dumps(data, sort_keys=True, ensure_ascii=False, default=str)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    except Exception as exc:
+        LOGGER.warning(f"stable_json_hash failed: {exc}")
+        return ""
+
+
+def file_tree_stat_hash(directory):
+    """Hash file names, sizes, and mtimes under a directory."""
+    try:
+        h = hashlib.sha256()
+        if not os.path.isdir(directory):
+            return ""
+        for root, _, files in os.walk(directory):
+            for name in sorted(files):
+                path = os.path.join(root, name)
+                rel = os.path.relpath(path, directory)
+                try:
+                    st = os.stat(path)
+                except OSError:
+                    continue
+                h.update(rel.encode("utf-8"))
+                h.update(str(st.st_size).encode("ascii"))
+                h.update(str(st.st_mtime_ns).encode("ascii"))
+        return h.hexdigest()
+    except Exception as exc:
+        LOGGER.warning(f"file_tree_stat_hash failed: {exc}")
+        return ""
+
+
+def git_head_commit(root_dir):
+    """Return current git HEAD commit without spawning git."""
+    try:
+        git_dir = os.path.join(root_dir, ".git")
+        head_path = os.path.join(git_dir, "HEAD")
+        with open(head_path, "r", encoding="utf-8") as f:
+            head = f.read().strip()
+        if head.startswith("ref:"):
+            ref = head.split(" ", 1)[1]
+            ref_path = os.path.join(git_dir, ref)
+            with open(ref_path, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        return head
+    except Exception:
+        return ""
 
 def remove_old_files(directory, n=2000, m=100):
     """

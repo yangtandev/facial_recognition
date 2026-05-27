@@ -295,16 +295,28 @@ class CameraSystem:
                             if snapshot is not None:
                                 saved_img, meta = snapshot
                             else:
-                                # Fallback to old method (for backwards compatibility)
-                                saved_img = self.system.state.success_frame[self.frame_num]
+                                saved_img = None
                                 meta = self.system.state.success_metadata[self.frame_num]
 
                             if saved_img is not None:
-                                self.save_img(
-                                    saved_img, "face", success_staff_name, confidence, z_score, width_val, metadata=meta)
+                                meta, snapshot_ok, snapshot_reason = self._prepare_snapshot_metadata(
+                                    saved_img, meta)
+                                if snapshot_ok:
+                                    self.save_img(
+                                        saved_img, "face", success_staff_name, confidence, z_score, width_val, metadata=meta)
+                                else:
+                                    log_name = f"{success_staff_name}_{snapshot_reason}"
+                                    self.save_img(
+                                        saved_img, "potential_miss", log_name, confidence, z_score, width_val, metadata=meta)
                             else:
+                                if isinstance(meta, dict):
+                                    meta = dict(meta)
+                                    meta["snapshot_missing"] = True
+                                    meta["save_requested_at"] = datetime.datetime.now().isoformat()
+                                LOGGER.warning(
+                                    f"[SnapshotMissing] Skip success face save: camera={self.frame_num}, staff={success_staff_name}")
                                 self.save_img(
-                                    self.system.state.frame_high_res[self.frame_num], "face", success_staff_name, confidence, z_score, width_val, metadata=meta)
+                                    self.system.state.frame_high_res[self.frame_num], "potential_miss", f"{success_staff_name}_SnapshotMissing", confidence, z_score, width_val, metadata=meta)
                         else:
                             # [2026-02-03 Fix] 衣著檢查未通過的回饋
                             # 1. 語音提示
@@ -333,8 +345,48 @@ class CameraSystem:
                                     saved_img, "potential_miss", log_name, confidence, z_score, width_val, metadata=meta)
 
                     self.system.state.same_people[self.frame_num] = 0.0
+                    self.system.state.success_snapshot[self.frame_num] = None
+                    self.system.state.success_metadata[self.frame_num] = None
 
             self.show_frame = now_frame
+
+    def _prepare_snapshot_metadata(self, saved_img, metadata):
+        if not isinstance(metadata, dict):
+            LOGGER.warning(
+                f"[SuccessGateFail] camera={self.frame_num}, reason=MetadataMissing")
+            return {"success_gate_failed": True, "success_gate_reason": "MetadataMissing"}, False, "MetadataMissing"
+
+        meta = dict(metadata)
+        saved_hash = frame_hash(saved_img)
+        decision_hash = meta.get("decision_frame_hash")
+        meta["saved_frame_hash"] = saved_hash
+        meta["snapshot_hash_match"] = bool(
+            decision_hash and saved_hash and saved_hash == decision_hash)
+        meta["save_requested_at"] = datetime.datetime.now().isoformat()
+
+        if not decision_hash or saved_hash != decision_hash:
+            decision_hash_log = str(decision_hash or "")
+            saved_hash_log = str(saved_hash or "")
+            LOGGER.warning(
+                f"[SnapshotMismatch] camera={self.frame_num}, frame_id={meta.get('frame_id')}, "
+                f"decision_hash={decision_hash_log[:12]}, saved_hash={saved_hash_log[:12]}")
+            meta["success_gate_failed"] = True
+            meta["success_gate_reason"] = "SnapshotMismatch"
+            return meta, False, "SnapshotMismatch"
+
+        quality_score = float(meta.get("quality_score", 0.0) or 0.0)
+        quality_msg = str(meta.get("quality_msg", ""))
+        if quality_score <= 0.0 or quality_msg != "Pass":
+            LOGGER.warning(
+                f"[SuccessGateFail] camera={self.frame_num}, frame_id={meta.get('frame_id')}, "
+                f"quality_score={quality_score}, quality_msg={quality_msg}")
+            meta["success_gate_failed"] = True
+            meta["success_gate_reason"] = "QualityNotPass"
+            return meta, False, "QualityNotPass"
+
+        meta["success_gate_failed"] = False
+        meta["success_gate_reason"] = ""
+        return meta, True, ""
 
     def updata_screen(self):
         time.sleep(0.5)
