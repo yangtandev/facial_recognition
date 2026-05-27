@@ -1043,7 +1043,18 @@ def analyze_backlight_glare(frame, box):
         bg_mean = float(np.mean(bg_y)) if bg_y.size else 0.0
         bg_bright_ratio = float(np.mean(bg_y > 210)) if bg_y.size else 0.0
         bg_very_bright_ratio = float(np.mean(bg_y > 235)) if bg_y.size else 0.0
+        bg_hot_ratio = float(np.mean(bg_y > 245)) if bg_y.size else 0.0
         contrast = bg_mean - face_mean
+
+        if bg_y.size:
+            bg_hot_mask = (bg_y > 245).astype(np.uint8)
+            num, _, stats, _ = cv2.connectedComponentsWithStats(
+                bg_hot_mask, 8)
+            largest_bg_hot = (
+                int(stats[1:, cv2.CC_STAT_AREA].max()) if num > 1 else 0)
+            bg_hot_component_ratio = float(largest_bg_hot / max(1, bg_y.size))
+        else:
+            bg_hot_component_ratio = 0.0
 
         face_bgr = frame[fy1:fy2, fx1:fx2]
         face_gray = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2GRAY)
@@ -1122,6 +1133,7 @@ def analyze_backlight_glare(frame, box):
             fw >= 280 and
             bg_very_bright_ratio > 0.10 and
             bg_bright_ratio > 0.18 and
+            (bg_hot_ratio > 0.12 or bg_hot_component_ratio > 0.08) and
             bg_mean > 165 and
             contrast > 65 and
             face_mean < 115 and
@@ -1160,6 +1172,8 @@ def analyze_backlight_glare(frame, box):
             "background_mean_y": bg_mean,
             "background_bright_ratio": bg_bright_ratio,
             "background_very_bright_ratio": bg_very_bright_ratio,
+            "background_hot_ratio": bg_hot_ratio,
+            "background_hot_component_ratio": bg_hot_component_ratio,
             "background_face_contrast": float(contrast),
             "face_laplacian": face_lap,
             "side_hot_ratio": side_hot_ratio,
