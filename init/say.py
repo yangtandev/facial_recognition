@@ -36,7 +36,7 @@ class Say_:
         self.last_end_time = {}   # {token: timestamp}
         self.status_lock = threading.Lock()
 
-        self.last_queued_item = None 
+        self.last_queued_item = None
 
         if not os.path.isdir(self.path):
             os.makedirs(self.path)
@@ -49,10 +49,10 @@ class Say_:
         now = time.time()
         # 基礎去重
         if self.last_queued_item:
-            last_text, last_time = self.last_queued_item
+            last_text, last_time = self.last_queued_item[:2]
             if text == last_text and (now - last_time) < 1.2:
                 return
-        
+
         self.last_queued_item = (text, now)
 
         with self.priority_lock:
@@ -65,14 +65,15 @@ class Say_:
                 self._enqueue(text, filename, 2, preempt=False, token=token)
 
             elif priority == 1:
-                if self.current_priority == 1: return
-                
                 if self.current_priority == 2:
                     LOGGER.info(f"中斷提示語音，插播重要訊息: {text}")
                     self._bump_generation()
                     self._kill_current_process() # 強制停止外部播放器
                     self.current_priority = 1
                     self._enqueue(text, filename, 1, preempt=True, token=token)
+                elif self.current_priority == 1:
+                    LOGGER.info(f"重要語音播放中，排入佇列: {text}")
+                    self._enqueue(text, filename, 1, preempt=False, token=token)
                 else:
                     self.current_priority = 1
                     self._enqueue(text, filename, 1, preempt=False, token=token)
@@ -90,6 +91,10 @@ class Say_:
         with self.gen_lock:
             self.generation += 1
 
+    def _is_generation_current(self, gen):
+        with self.gen_lock:
+            return gen == self.generation
+
     def _kill_current_process(self):
         """殺死當前的 mpg123 進程"""
         with self.process_lock:
@@ -100,6 +105,18 @@ class Say_:
                 except:
                     pass
                 self.current_process = None
+
+    def _terminate_process(self, proc):
+        if not proc or proc.poll() is not None:
+            return
+        try:
+            proc.terminate()
+            proc.wait(timeout=0.2)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
 
     def _fallback_voice_path(self, filename_base):
         for suffix in ("_in", "_out", "_clothes"):
@@ -120,34 +137,43 @@ class Say_:
             commands.append(("mpg123", ["mpg123", "-q", full_path]))
         return commands
 
-    def _play_file(self, full_path):
+    def _play_file(self, full_path, gen, priority):
         now = time.time()
-        if now - self.last_playback_failure_time < self.playback_error_cooldown_sec:
+        if priority != 1 and now - self.last_playback_failure_time < self.playback_error_cooldown_sec:
             LOGGER.warning(
                 f"語音播放略過: 前次播放器失敗，冷卻 {self.playback_error_cooldown_sec:.0f}s 中")
             return False
 
         last_error = ""
         for player_name, cmd in self._player_commands(full_path):
+            if not self._is_generation_current(gen):
+                LOGGER.info(f"語音播放被插播取代，停止舊語音: {os.path.basename(full_path)}")
+                return False
+
+            proc = None
             try:
                 LOGGER.info(f"語音播放開始: {os.path.basename(full_path)} ({player_name})")
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                )
                 with self.process_lock:
-                    self.current_process = subprocess.Popen(
-                        cmd,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.PIPE,
-                    )
+                    self.current_process = proc
 
                 try:
-                    _, stderr = self.current_process.communicate(
-                        timeout=self.playback_timeout_sec)
+                    _, stderr = proc.communicate(timeout=self.playback_timeout_sec)
                 except subprocess.TimeoutExpired:
-                    self._kill_current_process()
+                    self._terminate_process(proc)
                     last_error = f"{player_name} timeout after {self.playback_timeout_sec:.1f}s"
                     LOGGER.warning(f"語音播放逾時，改試下一個播放器: {last_error}")
                     continue
 
-                return_code = self.current_process.returncode
+                if not self._is_generation_current(gen):
+                    LOGGER.info(f"語音播放被插播取代，停止舊語音: {os.path.basename(full_path)}")
+                    return False
+
+                return_code = proc.returncode
                 if return_code == 0:
                     LOGGER.info(f"語音播放完成: {os.path.basename(full_path)} ({player_name})")
                     return True
@@ -163,7 +189,8 @@ class Say_:
                 LOGGER.warning(f"語音播放器例外，改試下一個: {last_error}")
             finally:
                 with self.process_lock:
-                    self.current_process = None
+                    if self.current_process is proc:
+                        self.current_process = None
 
         LOGGER.error(f"語音播放失敗，沒有可用播放器或音訊設備不可用: {last_error}")
         self.last_playback_failure_time = time.time()
@@ -210,7 +237,7 @@ class Say_:
 
                     if os.path.getsize(full_path) < 100: continue
 
-                    self._play_file(full_path)
+                    self._play_file(full_path, gen, priority)
                     
                 except Exception as e:
                     LOGGER.error(f"播放進程發生錯誤: {e}")
