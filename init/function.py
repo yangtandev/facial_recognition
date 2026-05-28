@@ -1139,9 +1139,15 @@ def analyze_backlight_glare(frame, box):
             face_mean < 115 and
             face_lap < 30
         )
+        side_source_core = (
+            side_hot_ratio > 0.012 or
+            side_very_bright_ratio > 0.025 or
+            side_saturated_bright_ratio > 0.035
+        )
         side_source_glare = (
             fw >= 280 and
             face_mean >= 85 and
+            side_source_core and
             (
                 (
                     side_cyan_bright_ratio > 0.012 and
@@ -1182,6 +1188,7 @@ def analyze_backlight_glare(frame, box):
             "side_cyan_bright_ratio": side_cyan_bright_ratio,
             "side_cyan_core_ratio": side_cyan_core_ratio,
             "side_cyan_core_component_ratio": side_cyan_core_component_ratio,
+            "side_source_core": bool(side_source_core),
             "dark_face_bright_bg": bool(dark_face_bright_bg),
             "washed_face_glare": bool(washed_face_glare),
             "overhead_source_glare": bool(overhead_source_glare),
