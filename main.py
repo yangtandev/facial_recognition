@@ -68,6 +68,7 @@ HINT_VOICE_TEXTS = {
     "hint_look_down": "請低頭",
     "hint_center": "請站到中間",
     "hint_look_straight": "請正視鏡頭",
+    "hint_face_visible": "請完整露出臉部",
     "hint_sunset": "光線直射請遮擋",
     "hint_backlight": "請遮擋背後光源",
     "hint_occlusion": "請對準鏡頭",

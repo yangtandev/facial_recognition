@@ -1076,14 +1076,20 @@ class Comparison:
         offset = abs(face_center_x - frame_center_x)
         limit_offset = frame_w * 0.15  # 允許偏離 15%
         margin = 5
+        face_w = max(10, box[2] - box[0])
+        face_h = max(10, box[3] - box[1])
 
         # [2026-01-30 Fix] Initialize current_ear to prevent UnboundLocalError if face_w <= 100
         current_ear = 1.0
+        v_ratio = 0.0
 
         metrics = {
             'center_offset_px': float(offset),
             'center_limit_px': float(limit_offset),
-            'face_width_px': float(box[2] - box[0]),
+            'face_width_px': float(face_w),
+            'face_height_px': float(face_h),
+            'face_top_px': float(box[1]),
+            'face_bottom_px': float(box[3]),
             'visibility_margin': float(margin),
             'gaze_passed': False,
             'gaze_msg': 'Init',
@@ -1100,6 +1106,11 @@ class Comparison:
         # ---------------------------------------------------------
         # 2. 特徵點完整性檢查 (Visibility) - 完整性需求
         # ---------------------------------------------------------
+        top_clip_ratio = max(0.0, -float(box[1])) / float(face_h)
+        metrics['top_clip_ratio'] = float(top_clip_ratio)
+        if face_w > 500 and top_clip_ratio > 0.05:
+            return 0.0, f"臉部未完整露出 (FaceBoundaryClipped Top {top_clip_ratio:.2f})", metrics
+
         for i, p in enumerate(points):
             if p[0] < margin or p[0] > frame_w - margin or \
                p[1] < margin or p[1] > frame_h - margin:
@@ -1112,7 +1123,6 @@ class Comparison:
         from init.function import is_sunset_condition
 
         # 由於此檢查需要 crop ROI，為了效能，只在人臉足夠大時執行
-        face_w = max(10, box[2] - box[0])
         if face_w > 100:
             frame_to_use = self.system.state.frame_mtcnn[self.frame_num]
             if frame_to_use is not None:
@@ -1251,6 +1261,26 @@ class Comparison:
             if v_ratio > 1.6:
                 metrics['pitch_check'] = 'Fail (Eyes Out of Frame)'
                 return 0.0, f"抬頭/眼睛超出畫面 (V-Ratio: {v_ratio:.2f} > 1.6)", metrics
+
+        if 'yaw' in metrics:
+            yaw = metrics.get('yaw', 0.0)
+            roll = metrics.get('roll_angle', 0.0)
+            large_side_face_risk = (
+                face_w > 500 and
+                abs(yaw) > 22.0 and
+                abs(roll) < 6.0 and
+                v_ratio < 0.95
+            )
+            medium_side_face_risk = (
+                400 <= face_w < 430 and
+                abs(yaw) > 21.5 and
+                abs(roll) < 6.0 and
+                v_ratio < 0.75
+            )
+            metrics['side_face_risk'] = bool(
+                large_side_face_risk or medium_side_face_risk)
+            metrics['large_side_face_risk'] = bool(large_side_face_risk)
+            metrics['medium_side_face_risk'] = bool(medium_side_face_risk)
 
         # ---------------------------------------------------------
         # 3.2 閉眼檢查 (Eye Closure Check) - [2026-01-26 Fix]
@@ -1572,6 +1602,10 @@ class Comparison:
                 elif "未置中" in quality_msg:
                     self.system.state.hint_text[self.frame_num] = "請站到中間"
                     self.system.speaker.say("請站到中間", "hint_center", priority=2)
+                elif "完整露出" in quality_msg or "FaceBoundaryClipped" in quality_msg or "特徵點被切除" in quality_msg:
+                    self.system.state.hint_text[self.frame_num] = "請完整露出臉部"
+                    self.system.speaker.say(
+                        "請完整露出臉部", "hint_face_visible", priority=2)
                 elif "斜視" in quality_msg or "未正視" in quality_msg or "側臉" in quality_msg or "影像模糊" in quality_msg:
                     self.system.state.hint_text[self.frame_num] = "請正視鏡頭"
                     self.system.speaker.say(
@@ -1698,14 +1732,36 @@ class Comparison:
                             face_blur_metrics.get('laplacian', 999) < 30 and
                             face_blur_metrics.get('tenengrad', 99999) < 900
                         )
+                        mid_texture_ambiguous = (
+                            400 <= face_width < 430 and
+                            20 <= face_blur_metrics.get('laplacian', 999) < 30 and
+                            face_blur_metrics.get('tenengrad', 99999) < 700 and
+                            gap < 0.05 and
+                            z_score < 2.1
+                        )
+                        side_face_ambiguous = (
+                            quality_metrics.get('large_side_face_risk', False) and
+                            confidence < 0.75 and
+                            gap < 0.08
+                        ) or (
+                            quality_metrics.get('medium_side_face_risk', False) and
+                            gap < 0.02 and
+                            z_score < 1.8
+                        )
                         low_texture_ambiguous = low_texture_face and (
                             (gap < 0.05 and z_score < 1.8) or
                             (face_width > 500 and confidence < 0.80 and gap < 0.08)
                         )
-                        if low_texture_ambiguous:
+                        if low_texture_ambiguous or mid_texture_ambiguous or side_face_ambiguous:
                             gap_threshold = max(
-                                gap_threshold, 0.08 if face_width > 500 else 0.05)
-                            quality_metrics['low_texture_ambiguous'] = True
+                                gap_threshold,
+                                0.08 if face_width > 500 or side_face_ambiguous else 0.05)
+                            quality_metrics['low_texture_ambiguous'] = bool(
+                                low_texture_ambiguous or mid_texture_ambiguous)
+                            quality_metrics['mid_texture_ambiguous'] = bool(
+                                mid_texture_ambiguous)
+                            quality_metrics['side_face_ambiguous'] = bool(
+                                side_face_ambiguous)
 
                         if gap < gap_threshold:
                             LOGGER.info(

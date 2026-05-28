@@ -1226,6 +1226,13 @@ def analyze_face_blur(frame, box):
             bright_ratio > 0.12 and
             very_bright_ratio > 0.05
         )
+        mid_low_texture_blur = (
+            340 <= face_w < 390 and
+            lap < 18 and
+            tenengrad < 700 and
+            bright_ratio < 0.04 and
+            very_bright_ratio < 0.02
+        )
         visible_low_texture_blur = (
             (
                 330 <= face_w < 430 and
@@ -1246,13 +1253,14 @@ def analyze_face_blur(frame, box):
         blur_small_face_glare = face_w < 340 and lap < 130 and tenengrad < 1400 and very_bright_ratio > 0.20
 
         return {
-            "is_blur": bool(severe_low_texture_blur or visible_low_texture_blur or glare_smear_blur or blur_small_face_glare),
+            "is_blur": bool(severe_low_texture_blur or mid_low_texture_blur or visible_low_texture_blur or glare_smear_blur or blur_small_face_glare),
             "laplacian": lap,
             "tenengrad": tenengrad,
             "background_bright_ratio": bright_ratio,
             "background_very_bright_ratio": very_bright_ratio,
             "blur_mid_face": bool(severe_low_texture_blur or glare_smear_blur),
             "severe_low_texture_blur": bool(severe_low_texture_blur),
+            "mid_low_texture_blur": bool(mid_low_texture_blur),
             "visible_low_texture_blur": bool(visible_low_texture_blur),
             "glare_smear_blur": bool(glare_smear_blur),
             "blur_small_face_glare": bool(blur_small_face_glare),
