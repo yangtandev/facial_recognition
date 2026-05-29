@@ -1406,6 +1406,11 @@ class FaceRecognitionSystem:
             # Detector logic in init/model.py relies on its own CONFIG copy.
             init.model.CONFIG = CONFIG
 
+            # [2026-05-30 Fix] Update dynamic runtime variables from new CONFIG
+            gm = CONFIG.get("min_face", 100)
+            self.state.min_face = [CONFIG.get("inCamera", {}).get(
+                "min_face", gm), CONFIG.get("outCamera", {}).get("min_face", gm)]
+
             LOGGER.info(
                 "Synced configuration to function and init.model modules.")
 
