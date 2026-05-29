@@ -1008,13 +1008,11 @@ class Comparison:
             if len(safe_reason) > 50:
                 safe_reason = safe_reason[:50]
 
-            # 檔名格式: HH;MM;SS_In_W{width}_Fail_{reason}.jpg
-            filename = f"{time_str}_{cam_tag}_W{width}_Fail_{safe_reason}.jpg"
+            # 檔名格式: HH;MM;SS_In_W{width}_Fail_{reason}.png
+            filename = f"{time_str}_{cam_tag}_W{width}_Fail_{safe_reason}.png"
             filepath = os.path.join(save_dir, filename)
 
-            cv2.imwrite(filepath, frame)
-            png_path = os.path.splitext(filepath)[0] + ".png"
-            cv2.imwrite(png_path, frame, [cv2.IMWRITE_PNG_COMPRESSION, 3])
+            cv2.imwrite(filepath, frame, [cv2.IMWRITE_PNG_COMPRESSION, 3])
             return filepath
         except Exception as e:
             LOGGER.error(f"儲存潛在失敗截圖時發生錯誤: {e}")
@@ -1038,8 +1036,7 @@ class Comparison:
                 data["frame_shape"] = packet_meta.get("shape")
             if frame is not None:
                 data["decision_frame_hash"] = frame_hash(frame)
-                data["lossless_frame_file"] = os.path.basename(
-                    os.path.splitext(image_path)[0] + ".png")
+                data["lossless_frame_file"] = os.path.basename(image_path)
                 data["lossless_frame_hash"] = frame_hash(frame)
                 data["lossless_frame_format"] = "png"
             if box is not None:

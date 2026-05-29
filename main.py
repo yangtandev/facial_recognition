@@ -591,22 +591,18 @@ class CameraSystem:
             if time.time() - last_time > 5 or (self.save_name_last != staffname and staffname != ""):
                 fname_base = f"{t_str}{tag_str}_{staffname}_C{int(conf*100)}_Z{z_score:.2f}_W{width}" if staffname else f"{t_str}{tag_str}"
                 save_dir = f"{main_path}/img_log/{path}/{d_str}"
-                fname = f"{fname_base}.jpg"
-                jpg_path = f"{save_dir}/{fname}"
-                cv2.imwrite(jpg_path, img)
+                fname = f"{fname_base}.png"
+                png_path = f"{save_dir}/{fname}"
+                cv2.imwrite(png_path, img, [cv2.IMWRITE_PNG_COMPRESSION, 3])
 
                 # [2026-01-19 Feature] Save Snapshot Metadata for Replay/Debugging
                 if metadata:
                     json_path = f"{save_dir}/{fname_base}.json"
                     try:
                         metadata = dict(metadata)
-                        png_name = f"{fname_base}.png"
-                        png_path = f"{save_dir}/{png_name}"
-                        cv2.imwrite(png_path, img, [cv2.IMWRITE_PNG_COMPRESSION, 3])
-                        metadata["lossless_frame_file"] = png_name
+                        metadata["lossless_frame_file"] = fname
                         metadata["lossless_frame_hash"] = frame_hash(img)
                         metadata["lossless_frame_format"] = "png"
-                        metadata["jpg_frame_file"] = fname
 
                         # Convert numpy types to native python types for JSON serialization
                         def default_converter(o):
