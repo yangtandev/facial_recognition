@@ -55,7 +55,7 @@ CAMERA = {0: "inCamera", 1: "outCamera"}
 CAM_NAME_MAP = {0: "入口", 1: "出口"}
 POTENTIAL_MISS_RATIO = 0.8
 Z_SCORE_THRESHOLD = 1.5
-QUALITY_RULE_VERSION = "2026-05-28.1"
+QUALITY_RULE_VERSION = "2026-05-29.1"
 
 test_img = cv2.imread(os.path.join(
     os.path.dirname(__file__), "../other/test_img.jpg"))
@@ -1013,6 +1013,8 @@ class Comparison:
             filepath = os.path.join(save_dir, filename)
 
             cv2.imwrite(filepath, frame)
+            png_path = os.path.splitext(filepath)[0] + ".png"
+            cv2.imwrite(png_path, frame, [cv2.IMWRITE_PNG_COMPRESSION, 3])
             return filepath
         except Exception as e:
             LOGGER.error(f"儲存潛在失敗截圖時發生錯誤: {e}")
@@ -1036,6 +1038,10 @@ class Comparison:
                 data["frame_shape"] = packet_meta.get("shape")
             if frame is not None:
                 data["decision_frame_hash"] = frame_hash(frame)
+                data["lossless_frame_file"] = os.path.basename(
+                    os.path.splitext(image_path)[0] + ".png")
+                data["lossless_frame_hash"] = frame_hash(frame)
+                data["lossless_frame_format"] = "png"
             if box is not None:
                 data["face_box"] = [int(v) for v in box]
 
@@ -1752,32 +1758,65 @@ class Comparison:
                             (gap < 0.05 and z_score < 1.8) or
                             (face_width > 500 and confidence < 0.80 and gap < 0.08)
                         )
-                        if low_texture_ambiguous or mid_texture_ambiguous or side_face_ambiguous:
+                        eye_closed_ambiguous = (
+                            quality_metrics.get('ear', 1.0) < 0.15 and
+                            confidence < 0.75 and
+                            z_score < 2.0 and
+                            gap < 0.06
+                        )
+                        top_edge_ambiguous = (
+                            face_width >= 500 and
+                            quality_metrics.get('face_top_px', 999.0) < 20.0 and
+                            confidence >= 0.78 and
+                            gap < 0.05
+                        )
+                        if (
+                            low_texture_ambiguous or
+                            mid_texture_ambiguous or
+                            side_face_ambiguous or
+                            eye_closed_ambiguous or
+                            top_edge_ambiguous
+                        ):
                             gap_threshold = max(
                                 gap_threshold,
-                                0.08 if face_width > 500 or side_face_ambiguous else 0.05)
+                                0.08 if face_width > 500 or side_face_ambiguous else 0.05,
+                                0.06 if eye_closed_ambiguous else 0.0,
+                                0.05 if top_edge_ambiguous else 0.0)
                             quality_metrics['low_texture_ambiguous'] = bool(
                                 low_texture_ambiguous or mid_texture_ambiguous)
                             quality_metrics['mid_texture_ambiguous'] = bool(
                                 mid_texture_ambiguous)
                             quality_metrics['side_face_ambiguous'] = bool(
                                 side_face_ambiguous)
+                            quality_metrics['eye_closed_ambiguous'] = bool(
+                                eye_closed_ambiguous)
+                            quality_metrics['top_edge_ambiguous'] = bool(
+                                top_edge_ambiguous)
 
                         if gap < gap_threshold:
                             LOGGER.info(
                                 f"[{camera_name}][Gap過濾] 分數過於接近 (Gap: {gap:.4f} < {gap_threshold}) - 拒絕辨識")
+                            if eye_closed_ambiguous:
+                                quality_metrics['quality_reject_reason'] = "quality_眼睛閉合_(AmbiguousEAR)"
+                            elif top_edge_ambiguous:
+                                quality_metrics['quality_reject_reason'] = "quality_影像模糊_(TopEdgeAmbiguous)"
+                            elif mid_texture_ambiguous:
+                                quality_metrics['quality_reject_reason'] = "quality_影像模糊_(BlurFace)"
+                            elif side_face_ambiguous:
+                                quality_metrics['quality_reject_reason'] = "quality_未正視鏡頭_(SideFaceAmbiguous)"
 
                             # [2026-01-30 Feature] 潛在失敗數據收集 (Gap Fail)
                             if face_width >= min_face_threshold and now - self.last_potential_miss_log_time > 1.0:
                                 try:
                                     snapshot = _frame
                                     if snapshot is not None:
-                                        reason_str = f"Gap_Fail_{gap:.4f}"
+                                        reason_str = quality_metrics.get(
+                                            'quality_reject_reason') or f"Gap_Fail_{gap:.4f}"
                                         saved_path = self._save_potential_miss_image(
                                             snapshot, face_width, min_face_threshold, camera_name, reason=reason_str)
                                         if saved_path:
                                             self._save_potential_miss_json(
-                                                saved_path, quality_metrics, f"Gap Fail: {gap:.4f}",
+                                                saved_path, quality_metrics, reason_str,
                                                 frame=snapshot, packet_meta=_packet_meta, box=_box)
                                         self.last_potential_miss_log_time = now
                                 except:
