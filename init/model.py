@@ -1699,7 +1699,7 @@ class Comparison:
                             if quality_metrics.get('is_extreme_pose', False):
                                 required_conf = 0.65 if z >= 2.5 else 0.85
                             else:
-                                required_conf = 0.65 if z >= 2.5 else 0.70
+                                required_conf = 0.65 if z >= 2.5 else 0.72
 
                             # Strict Filter: Must pass BOTH thresholds
                             if s_final >= required_conf and z >= Z_SCORE_THRESHOLD:
@@ -1730,9 +1730,7 @@ class Comparison:
                             gap = float(distances[0]) - float(distances[1])
 
                         # Dynamic Threshold Formula
-                        # 如果信心度極高 (>0.80)，容忍較小的 Gap (0.02)
-                        # 否則需要較大的 Gap (0.03) 以確保安全
-                        gap_threshold = 0.005 if confidence >= 0.75 or z_score >= 2.5 else 0.015
+                        gap_threshold = 0.03
                         face_blur_metrics = quality_metrics.get('face_blur', {})
                         low_texture_face = (
                             face_blur_metrics.get('laplacian', 999) < 30 and
@@ -1931,7 +1929,7 @@ class Comparison:
             if quality_metrics.get('is_extreme_pose', False):
                 final_required_conf = 0.65 if z_score >= 2.5 else 0.85
             else:
-                final_required_conf = 0.65 if z_score >= 2.5 else 0.70
+                final_required_conf = 0.65 if z_score >= 2.5 else 0.72
             if quality_metrics.get('relaxed_high_z_accept', False):
                 final_required_conf = min(final_required_conf, 0.68)
 
