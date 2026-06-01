@@ -72,6 +72,7 @@ HINT_VOICE_TEXTS = {
     "hint_sunset": "光線直射請遮擋",
     "hint_backlight": "請遮擋背後光源",
     "hint_occlusion": "請對準鏡頭",
+    "hint_unrecognized": "無法識別",
 }
 
 

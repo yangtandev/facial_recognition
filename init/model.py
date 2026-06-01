@@ -917,6 +917,14 @@ class Comparison:
         self.DISPLAY_STATE_HOLD_SECONDS = 2  # 辨識成功後，名稱顯示的持續時間
         self.CONFIDENCE_THRESHOLD = 0.7      # 可靠辨識的信賴度門檻 (員工)
         self.VISITOR_CONF_THRESHOLD = 0.5    # 訪客辨識的信賴度門檻 (低於此值為訪客)
+        self.GRAY_ZONE_CONF_LOW = 0.70
+        self.GRAY_ZONE_CONF_HIGH = 0.72
+        self.GRAY_ZONE_TIMEOUT_SECONDS = 1.0
+        self.gray_zone_state = None
+        self.UNRECOGNIZED_HINT_COOLDOWN_SECONDS = 2.0
+        self.SUCCESS_AUDIO_SYNC_GUARD_SECONDS = 2.5
+        self.last_unrecognized_hint_time = 0.0
+        self.last_success_audio_time = 0.0
 
         # --- 新增: 潛在辨識失敗分析與統計 ---
         self.width_stats = defaultdict(int)  # 統計人臉寬度分佈 (區間:次數)
@@ -925,6 +933,7 @@ class Comparison:
         self.potential_miss_ratio = POTENTIAL_MISS_RATIO
         self.last_potential_miss_log_time = 0  # 上次記錄潛在失敗的時間 (限流用)
         self.last_backlight_potential_miss_log_time = 0
+        self.last_gray_zone_potential_miss_log_time = 0
         self.hint_clear_time = 0             # 提示文字清除時間
         self.last_hint_speak_time = 0        # 上次播報提示語音的時間
         # ---------------------------------
@@ -1062,6 +1071,214 @@ class Comparison:
     @staticmethod
     def _is_backlight_quality_msg(msg):
         return "背後光源" in msg or "BacklightGlare" in msg or "光源散射" in msg
+
+    def _show_unrecognized_hint(
+            self, now, camera_name, reason, confidence=0.0,
+            z_score=0.0, gap=0.0):
+        if now - self.last_success_audio_time < self.SUCCESS_AUDIO_SYNC_GUARD_SECONDS:
+            LOGGER.info(
+                f"[{camera_name}][無法識別略過] RecentSuccessAudio, "
+                f"reason={reason}, conf={confidence:.3f}, "
+                f"z={z_score:.2f}, gap={gap:.4f}")
+            return
+        self.system.state.hint_text[self.frame_num] = "無法識別"
+        self.hint_clear_time = now + 1.5
+        if self.system.state.same_class[self.frame_num] != "None":
+            self._update_display_state("None")
+        if now - self.last_unrecognized_hint_time >= self.UNRECOGNIZED_HINT_COOLDOWN_SECONDS:
+            self.system.speaker.say("無法識別", "hint_unrecognized", priority=2)
+            self.last_unrecognized_hint_time = now
+        LOGGER.info(
+            f"[{camera_name}][無法識別] {reason}, "
+            f"conf={confidence:.3f}, z={z_score:.2f}, gap={gap:.4f}")
+
+    def _clear_gray_zone_state(self):
+        self.gray_zone_state = None
+
+    def _make_gray_zone_state(
+            self, person_id, confidence, z_score, gap, frame,
+            quality_metrics, packet_meta, box, now):
+        metrics = dict(quality_metrics or {})
+        metrics["gray_zone_candidate_id"] = person_id
+        metrics["gray_zone_best_confidence"] = float(confidence)
+        metrics["gray_zone_best_z_score"] = float(z_score)
+        metrics["gray_zone_best_gap"] = float(gap)
+        return {
+            "person_id": person_id,
+            "first_seen": now,
+            "last_seen": now,
+            "seen_count": 1,
+            "best_confidence": float(confidence),
+            "best_z_score": float(z_score),
+            "best_gap": float(gap),
+            "frame": frame.copy() if frame is not None else None,
+            "metrics": metrics,
+            "packet_meta": dict(packet_meta or {}),
+            "box": list(box) if box is not None else None,
+        }
+
+    def _update_gray_zone_state(
+            self, person_id, confidence, z_score, gap, frame,
+            quality_metrics, packet_meta, box, now):
+        state = self.gray_zone_state
+        if state is None or state.get("person_id") != person_id:
+            self.gray_zone_state = self._make_gray_zone_state(
+                person_id, confidence, z_score, gap, frame,
+                quality_metrics, packet_meta, box, now)
+            return self.gray_zone_state
+
+        state["last_seen"] = now
+        state["seen_count"] = int(state.get("seen_count", 0)) + 1
+        if confidence >= float(state.get("best_confidence", 0.0)):
+            state["best_confidence"] = float(confidence)
+            state["best_z_score"] = float(z_score)
+            state["best_gap"] = float(gap)
+            state["frame"] = frame.copy() if frame is not None else None
+            state["metrics"] = dict(quality_metrics or {})
+            state["packet_meta"] = dict(packet_meta or {})
+            state["box"] = list(box) if box is not None else None
+        state["metrics"]["gray_zone_candidate_id"] = person_id
+        state["metrics"]["gray_zone_best_confidence"] = float(
+            state.get("best_confidence", 0.0))
+        state["metrics"]["gray_zone_best_z_score"] = float(
+            state.get("best_z_score", 0.0))
+        state["metrics"]["gray_zone_best_gap"] = float(
+            state.get("best_gap", 0.0))
+        state["metrics"]["gray_zone_seen_count"] = int(
+            state.get("seen_count", 0))
+        return state
+
+    def _save_gray_zone_potential_miss(
+            self, state, camera_name, min_face_threshold, reason, now,
+            current_confidence=None, current_z_score=None, current_gap=None):
+        if not state:
+            return
+        if now - self.last_gray_zone_potential_miss_log_time <= 1.0:
+            return
+        frame = state.get("frame")
+        if frame is None:
+            return
+        metrics = dict(state.get("metrics") or {})
+        metrics.update({
+            "gray_zone_failed": True,
+            "gray_zone_fail_reason": reason,
+            "gray_zone_candidate_id": state.get("person_id"),
+            "gray_zone_seen_count": int(state.get("seen_count", 0)),
+            "gray_zone_duration": float(
+                state.get("last_seen", now) - state.get("first_seen", now)),
+            "gray_zone_best_confidence": float(state.get("best_confidence", 0.0)),
+            "gray_zone_best_z_score": float(state.get("best_z_score", 0.0)),
+            "gray_zone_best_gap": float(state.get("best_gap", 0.0)),
+            "gray_zone_fail_confidence": (
+                None if current_confidence is None else float(current_confidence)
+            ),
+            "gray_zone_fail_z_score": (
+                None if current_z_score is None else float(current_z_score)
+            ),
+            "gray_zone_fail_gap": (
+                None if current_gap is None else float(current_gap)
+            ),
+            "gray_zone_conf_low": float(self.GRAY_ZONE_CONF_LOW),
+            "gray_zone_conf_high": float(self.GRAY_ZONE_CONF_HIGH),
+            "gray_zone_timeout_seconds": float(self.GRAY_ZONE_TIMEOUT_SECONDS),
+        })
+        width = int(metrics.get("face_width_px", 0) or 0)
+        if width <= 0 and state.get("box") is not None:
+            box = state.get("box")
+            width = int(box[2] - box[0])
+        reason_str = f"GrayZone_{reason}_灰區未通過"
+        try:
+            saved_path = self._save_potential_miss_image(
+                frame, width, min_face_threshold, camera_name,
+                reason=reason_str)
+            if saved_path:
+                self._save_potential_miss_json(
+                    saved_path, metrics, reason_str,
+                    frame=frame, packet_meta=state.get("packet_meta"),
+                    box=state.get("box"))
+                LOGGER.info(
+                    f"[{camera_name}][灰區未通過] {reason}, "
+                    f"ID={state.get('person_id')}, "
+                    f"best_conf={float(state.get('best_confidence', 0.0)):.3f}, "
+                    f"seen={int(state.get('seen_count', 0))}, saved={saved_path}")
+            self.last_gray_zone_potential_miss_log_time = now
+        except Exception as e:
+            LOGGER.error(f"[{camera_name}][灰區未通過] 存檔失敗: {e}")
+
+    def _handle_gray_zone_before_success(
+            self, predicted_id, confidence, z_score, gap, is_in_candidates,
+            quality_metrics, frame, packet_meta, box, camera_name,
+            min_face_threshold, now):
+        if predicted_id in ("None", "__VISITOR__") or not is_in_candidates:
+            if self.gray_zone_state is not None:
+                self._save_gray_zone_potential_miss(
+                    self.gray_zone_state, camera_name, min_face_threshold,
+                    "CandidateLost", now, confidence, z_score, gap)
+                self._show_unrecognized_hint(
+                    now, camera_name, "GrayZoneCandidateLost",
+                    confidence, z_score, gap)
+                self._clear_gray_zone_state()
+            return True
+
+        is_gray_zone = (
+            self.GRAY_ZONE_CONF_LOW <= confidence < self.GRAY_ZONE_CONF_HIGH and
+            z_score >= Z_SCORE_THRESHOLD and
+            gap >= 0.03
+        )
+
+        if self.gray_zone_state is not None:
+            gray_id = self.gray_zone_state.get("person_id")
+            if predicted_id == gray_id and confidence >= self.GRAY_ZONE_CONF_HIGH:
+                LOGGER.info(
+                    f"[{camera_name}][灰區確認通過] ID={predicted_id}, "
+                    f"conf={confidence:.3f}, z={z_score:.2f}, gap={gap:.4f}")
+                quality_metrics["gray_zone_confirmed"] = True
+                quality_metrics["gray_zone_seen_count"] = int(
+                    self.gray_zone_state.get("seen_count", 0)) + 1
+                self._clear_gray_zone_state()
+                return True
+
+            if predicted_id != gray_id:
+                self._save_gray_zone_potential_miss(
+                    self.gray_zone_state, camera_name, min_face_threshold,
+                    "CandidateChanged", now, confidence, z_score, gap)
+                self._clear_gray_zone_state()
+            elif not is_gray_zone:
+                self._save_gray_zone_potential_miss(
+                    self.gray_zone_state, camera_name, min_face_threshold,
+                    "ConditionFailed", now, confidence, z_score, gap)
+                self._show_unrecognized_hint(
+                    now, camera_name, "GrayZoneConditionFailed",
+                    confidence, z_score, gap)
+                self._clear_gray_zone_state()
+                return True
+
+        if not is_gray_zone:
+            return True
+
+        state = self._update_gray_zone_state(
+            predicted_id, confidence, z_score, gap, frame,
+            quality_metrics, packet_meta, box, now)
+        elapsed = now - float(state.get("first_seen", now))
+        quality_metrics["gray_zone_pending"] = True
+        quality_metrics["gray_zone_seen_count"] = int(state.get("seen_count", 0))
+        quality_metrics["gray_zone_elapsed"] = float(elapsed)
+
+        if elapsed >= self.GRAY_ZONE_TIMEOUT_SECONDS:
+            self._save_gray_zone_potential_miss(
+                state, camera_name, min_face_threshold,
+                "Timeout", now, confidence, z_score, gap)
+            self._show_unrecognized_hint(
+                now, camera_name, "GrayZoneTimeout",
+                confidence, z_score, gap)
+            self._clear_gray_zone_state()
+            return False
+
+        LOGGER.info(
+            f"[{camera_name}][灰區等待] ID={predicted_id}, "
+            f"conf={confidence:.3f}, z={z_score:.2f}, gap={gap:.4f}, "
+            f"seen={int(state.get('seen_count', 0))}, elapsed={elapsed:.2f}s")
+        return False
 
     def check_face_quality(self, box, points, frame_w, frame_h, gaze_status):
         """
@@ -1356,6 +1573,7 @@ class Comparison:
             self.system.state.clothes_display_suppressed[self.frame_num] = False
 
     def _clear_recognition_state(self):
+        self._clear_gray_zone_state()
         if self.display_state['person_id'] != 'None' or self.system.state.same_class[self.frame_num] != "None":
             self._update_display_state('None')
         self.system.state.same_people[self.frame_num] = 0.0
@@ -1551,6 +1769,11 @@ class Comparison:
 
             if quality_score == 0.0:
                 LOGGER.info(f"[{camera_name}][品質過濾] {quality_msg}")
+                if self.gray_zone_state is not None:
+                    self._save_gray_zone_potential_miss(
+                        self.gray_zone_state, camera_name,
+                        min_face_threshold, "QualityFailed", now)
+                    self._clear_gray_zone_state()
 
                 # [2026-01-30 Feature] 潛在失敗數據收集 (大臉但被品質過濾)
                 is_backlight_quality = self._is_backlight_quality_msg(
@@ -1650,6 +1873,8 @@ class Comparison:
             else:
                 comparison_start_time = time.monotonic()
 
+            gap = 0.0
+
             try:
                 if self.system.state.ann_index is None or self.system.state.ann_index.index is None or self.system.state.ann_index.index.ntotal == 0:
                     predicted_id = "None"
@@ -1722,7 +1947,6 @@ class Comparison:
 
                         # [2026-02-01 Feature] Gap Check for Ambiguity Rejection
                         # 攔截高分誤判 (High Confidence False Positive)
-                        gap = 0.0
                         if len(distances) > 1:
                             gap = float(distances[0]) - float(distances[1])
 
@@ -1817,6 +2041,9 @@ class Comparison:
                                 except:
                                     pass
 
+                            self._show_unrecognized_hint(
+                                now, camera_name, "GapFail",
+                                confidence, z_score, gap)
                             continue
 
                         # [2026-01-24 Feature] 記錄 Top-5 搜尋結果供除錯重現
@@ -1944,6 +2171,16 @@ class Comparison:
             log_msg += light_msg
             LOGGER.info(log_msg)
 
+            gray_zone_allows_success = self._handle_gray_zone_before_success(
+                predicted_id, confidence, z_score, gap, is_in_candidates,
+                quality_metrics, frame_curr, _packet_meta, _box,
+                camera_name, min_face_threshold, now)
+            if not gray_zone_allows_success:
+                self.system.state.same_people[self.frame_num] = 0.0
+                self.system.state.success_snapshot[self.frame_num] = None
+                self.system.state.success_metadata[self.frame_num] = None
+                continue
+
             if is_in_candidates and predicted_id != "None" and confidence >= final_required_conf and z_score >= Z_SCORE_THRESHOLD:
                 if self.system.state.same_class[self.frame_num] != predicted_id:
                     success_meta = self.system.state.success_metadata[self.frame_num]
@@ -1963,6 +2200,7 @@ class Comparison:
                     # [2026-01-20 Fix] 傳入 confidence 供日誌記錄
                     check_in_out(self.system, staff_name, predicted_id,
                                  self.frame_num, self.system.n_camera < 2, confidence)
+                    self.last_success_audio_time = now
                     self.last_api_trigger_time[predicted_id] = now
 
                     # [2026-02-09 Fix] Sync state to trigger save_img in main.py
@@ -1989,15 +2227,24 @@ class Comparison:
                         try:
                             self.system.speaker.say(
                                 f"{staff_name}{CONFIG['say'][cam_tag]}", staff_name + "_" + cam_tag, priority=1, token=predicted_id)
+                            self.last_success_audio_time = now
                         except Exception:
                             pass
 
             elif predicted_id != "None" and confidence >= 0.58:
-                # [2026-04-14 Fix] 將未能錄取員工但具有一定置信度的辨識標記為訪客
-                # 攔截因分數在 0.58~0.70 被系統忽略，但後續突然跳上 0.7 導致誤認員工的情況
-                if self.system.state.same_class[self.frame_num] != '訪客':
-                    self._update_display_state('訪客')
-                # 依據要求，不發出聲音提示
+                # 品質已通過、也已進入辨識階段，但分數不足以確認身分。
+                # 給使用者明確回饋，避免現場誤以為系統沒有運作。
+                fail_reasons = []
+                if not is_in_candidates:
+                    fail_reasons.append("NotCandidate")
+                if confidence < final_required_conf:
+                    fail_reasons.append("LowConfidence")
+                if z_score < Z_SCORE_THRESHOLD:
+                    fail_reasons.append("LowZScore")
+                self._show_unrecognized_hint(
+                    now, camera_name,
+                    "+".join(fail_reasons) if fail_reasons else "RecognitionFailed",
+                    confidence, z_score, gap)
             else:
                 # Low Confidence or None
                 pass
