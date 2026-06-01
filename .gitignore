@@ -46,3 +46,6 @@ tests/
 
 # --- Training ---
 train/
+
+# --- Data ---
+data/
