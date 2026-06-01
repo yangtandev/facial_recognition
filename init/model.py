@@ -915,7 +915,7 @@ class Comparison:
         self.last_api_trigger_time = {}  # 記錄每個人員上次觸發API/語音的時間，用於防止短時間重複播報
 
         self.DISPLAY_STATE_HOLD_SECONDS = 2  # 辨識成功後，名稱顯示的持續時間
-        self.CONFIDENCE_THRESHOLD = 0.7      # 可靠辨識的信賴度門檻 (員工)
+        self.CONFIDENCE_THRESHOLD = 0.72     # 可靠辨識的信賴度門檻 (員工)
         self.VISITOR_CONF_THRESHOLD = 0.5    # 訪客辨識的信賴度門檻 (低於此值為訪客)
         self.GRAY_ZONE_CONF_LOW = 0.70
         self.GRAY_ZONE_CONF_HIGH = 0.72
@@ -1917,11 +1917,11 @@ class Comparison:
                             z = (s_raw - mean_score) / \
                                 std_dev_score if std_dev_score > 0 else 0
 
-                            # [2026-04-15] 四象限 Z-Score 動態門檻矩陣
+                            # 不再因高 Z-score 降低 confidence 門檻。
                             if quality_metrics.get('is_extreme_pose', False):
-                                required_conf = 0.65 if z >= 2.5 else 0.85
+                                required_conf = 0.85
                             else:
-                                required_conf = 0.65 if z >= 2.5 else 0.72
+                                required_conf = self.CONFIDENCE_THRESHOLD
 
                             # Strict Filter: Must pass BOTH thresholds
                             if s_final >= required_conf and z >= Z_SCORE_THRESHOLD:
@@ -2091,24 +2091,6 @@ class Comparison:
                                     )
                                     is_in_candidates = False
                                     best_match_id = '__VISITOR__'
-                        else:
-                            # Recover stable medium-confidence matches that were rejected only by
-                            # the 0.70 confidence gate, while still requiring clear separation.
-                            baselines = getattr(
-                                self.system.state.ann_index, 'enrollment_baselines', {})
-                            personal_thresh = baselines.get(best_match_id)
-                            relaxed_high_z_accept = (
-                                best_match_id not in ("None", "__VISITOR__") and
-                                not quality_metrics.get('is_bad_pose', False) and
-                                confidence >= 0.68 and
-                                z_score >= 2.1 and
-                                gap >= 0.05 and
-                                (personal_thresh is None or raw_confidence >= personal_thresh)
-                            )
-                            if relaxed_high_z_accept:
-                                is_in_candidates = True
-                                quality_metrics['relaxed_high_z_accept'] = True
-                                part_msg += " [RelaxedHighZ]"
                         predicted_id = best_match_id
 
                         # [2026-01-24 Feature] 建立完整的 Snapshot Metadata (供離線重現測試)
@@ -2145,17 +2127,13 @@ class Comparison:
             staff_name = self.system.state.features_dict.get(
                 "id_name", {}).get(predicted_id, "未知")
 
-            # [2026-02-09 V5 Logic] Recalculate dynamic threshold for final decision & logging
-            # [2026-05-04 Fix] Use is_extreme_pose (yaw>30°) instead of is_bad_pose (yaw>25°)
-            # for the strict 0.85 gate. Rationale: yaw=25-30° faces are valid-quality and
-            # should not be penalized with an impossibly high confidence threshold.
+            # Final decision uses fixed confidence gates; high Z-score no longer lowers confidence.
+            # Extreme-pose frames keep the stricter 0.85 gate.
             final_required_conf = self.CONFIDENCE_THRESHOLD
             if quality_metrics.get('is_extreme_pose', False):
-                final_required_conf = 0.65 if z_score >= 2.5 else 0.85
+                final_required_conf = 0.85
             else:
-                final_required_conf = 0.65 if z_score >= 2.5 else 0.72
-            if quality_metrics.get('relaxed_high_z_accept', False):
-                final_required_conf = min(final_required_conf, 0.68)
+                final_required_conf = self.CONFIDENCE_THRESHOLD
 
             # [2026-01-11 Fix] 補回遺漏的 Log 訊息定義
             quality_rating = "Low Confidence"
