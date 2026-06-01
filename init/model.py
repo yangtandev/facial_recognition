@@ -84,6 +84,8 @@ class Detector:
         # Vest at distance is more prone to intermittent YOLO misses than helmet.
         # Hold recent valid detections briefly so a standing user does not flicker out.
         self.clothe_hold_seconds = [2.5, 0.0, 1.5]
+        self.last_clothes_hint_speak_time = 0.0
+        self.clothes_hint_cooldown_seconds = 2.0
         # 初始化 MediaPipe 處理器
         self.mp_handler = MediaPipeHandler()
 
@@ -283,6 +285,13 @@ class Detector:
                     # 鐵則：服裝辨識開啟後，未同時通過安全帽+背心，不產生臉辨資料。
                     if clothes_gate_required and not clothes_gate_pass:
                         self.system.state.hint_text[self.frame_num] = "請正確著裝"
+                        if box is not None and now - self.last_clothes_hint_speak_time >= self.clothes_hint_cooldown_seconds:
+                            self.system.speaker.say(
+                                CONFIG.get("say", {}).get("clothes", "請正確著裝"),
+                                "hint_clothes",
+                                priority=2,
+                            )
+                            self.last_clothes_hint_speak_time = now
                         self.system.state.frame_data[self.frame_num] = None
                         self.system.state.gaze_status[self.frame_num] = None
                         self.system.state.head_pose[self.frame_num] = None
