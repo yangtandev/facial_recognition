@@ -1958,6 +1958,14 @@ class Comparison:
                         # 攔截高分誤判 (High Confidence False Positive)
                         if len(distances) > 1:
                             gap = float(distances[0]) - float(distances[1])
+                        top2_same_id = (
+                            len(faiss_person_ids) > 1 and
+                            faiss_person_ids[0] == faiss_person_ids[1]
+                        )
+                        if top2_same_id:
+                            quality_metrics['gap_skipped_same_id'] = True
+                            quality_metrics['gap_top1_id'] = faiss_person_ids[0]
+                            quality_metrics['gap_top2_id'] = faiss_person_ids[1]
 
                         # Dynamic Threshold Formula
                         gap_threshold = 0.03
@@ -2021,7 +2029,7 @@ class Comparison:
                             quality_metrics['top_edge_ambiguous'] = bool(
                                 top_edge_ambiguous)
 
-                        if gap < gap_threshold:
+                        if not top2_same_id and gap < gap_threshold:
                             LOGGER.info(
                                 f"[{camera_name}][Gap過濾] 分數過於接近 (Gap: {gap:.4f} < {gap_threshold}) - 拒絕辨識")
                             if eye_closed_ambiguous:
