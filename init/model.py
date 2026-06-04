@@ -2016,6 +2016,37 @@ class Comparison:
                             abs(quality_metrics.get('yaw', 0.0)) > 15 and
                             abs(quality_metrics.get('roll_angle', 0.0)) > 8
                         )
+                        motion_blur_quality_reject = (
+                            face_width >= 500 and
+                            80 <= face_blur_metrics.get('laplacian', 999) < 145 and
+                            face_blur_metrics.get('tenengrad', 99999) < 1500 and
+                            abs(quality_metrics.get('yaw', 0.0)) > 15 and
+                            abs(quality_metrics.get('roll_angle', 0.0)) > 15
+                        )
+                        if motion_blur_quality_reject:
+                            quality_metrics['motion_blur_quality_reject'] = True
+                            quality_metrics['quality_reject_reason'] = "quality_影像模糊_(MotionBlurQuality)"
+                            LOGGER.info(
+                                f"[{camera_name}][畫質過濾] 影像模糊 MotionBlurQuality - 拒絕辨識")
+                            if face_width >= min_face_threshold and now - self.last_potential_miss_log_time > 1.0:
+                                try:
+                                    snapshot = _frame
+                                    if snapshot is not None:
+                                        reason_str = quality_metrics['quality_reject_reason']
+                                        saved_path = self._save_potential_miss_image(
+                                            snapshot, face_width, min_face_threshold, camera_name, reason=reason_str)
+                                        if saved_path:
+                                            self._save_potential_miss_json(
+                                                saved_path, quality_metrics, reason_str,
+                                                frame=snapshot, packet_meta=_packet_meta, box=_box)
+                                        self.last_potential_miss_log_time = now
+                                except:
+                                    pass
+
+                            self._show_unrecognized_hint(
+                                now, camera_name, "MotionBlurQuality",
+                                confidence, z_score, gap)
+                            continue
                         if (
                             low_texture_ambiguous or
                             mid_texture_ambiguous or
