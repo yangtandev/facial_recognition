@@ -1163,6 +1163,13 @@ def analyze_backlight_glare(frame, box):
                 )
             )
         )
+        side_source_clear_face_suppressed = (
+            side_source_glare and
+            contrast < 25 and
+            face_lap >= 90
+        )
+        if side_source_clear_face_suppressed:
+            side_source_glare = False
         face_halo_glare = (
             fw >= 280 and
             100 <= face_mean <= 130 and
@@ -1193,6 +1200,7 @@ def analyze_backlight_glare(frame, box):
             "washed_face_glare": bool(washed_face_glare),
             "overhead_source_glare": bool(overhead_source_glare),
             "side_source_glare": bool(side_source_glare),
+            "side_source_clear_face_suppressed": bool(side_source_clear_face_suppressed),
             "face_halo_glare": bool(face_halo_glare),
         }
     except Exception as e:

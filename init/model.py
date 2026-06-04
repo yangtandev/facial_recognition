@@ -2006,18 +2006,30 @@ class Comparison:
                             confidence >= 0.78 and
                             gap < 0.05
                         )
+                        motion_blur_weak_separation = (
+                            face_width >= 500 and
+                            gap < 0.06 and
+                            z_score < 2.0 and
+                            confidence < 0.83 and
+                            80 <= face_blur_metrics.get('laplacian', 999) < 160 and
+                            face_blur_metrics.get('tenengrad', 99999) < 1800 and
+                            abs(quality_metrics.get('yaw', 0.0)) > 15 and
+                            abs(quality_metrics.get('roll_angle', 0.0)) > 8
+                        )
                         if (
                             low_texture_ambiguous or
                             mid_texture_ambiguous or
                             side_face_ambiguous or
                             eye_closed_ambiguous or
-                            top_edge_ambiguous
+                            top_edge_ambiguous or
+                            motion_blur_weak_separation
                         ):
                             gap_threshold = max(
                                 gap_threshold,
                                 0.08 if face_width > 500 or side_face_ambiguous else 0.05,
                                 0.06 if eye_closed_ambiguous else 0.0,
-                                0.05 if top_edge_ambiguous else 0.0)
+                                0.05 if top_edge_ambiguous else 0.0,
+                                0.06 if motion_blur_weak_separation else 0.0)
                             quality_metrics['low_texture_ambiguous'] = bool(
                                 low_texture_ambiguous or mid_texture_ambiguous)
                             quality_metrics['mid_texture_ambiguous'] = bool(
@@ -2028,6 +2040,8 @@ class Comparison:
                                 eye_closed_ambiguous)
                             quality_metrics['top_edge_ambiguous'] = bool(
                                 top_edge_ambiguous)
+                            quality_metrics['motion_blur_weak_separation'] = bool(
+                                motion_blur_weak_separation)
 
                         if not top2_same_id and gap < gap_threshold:
                             LOGGER.info(
@@ -2036,6 +2050,8 @@ class Comparison:
                                 quality_metrics['quality_reject_reason'] = "quality_眼睛閉合_(AmbiguousEAR)"
                             elif top_edge_ambiguous:
                                 quality_metrics['quality_reject_reason'] = "quality_影像模糊_(TopEdgeAmbiguous)"
+                            elif motion_blur_weak_separation:
+                                quality_metrics['quality_reject_reason'] = "quality_影像模糊_(MotionBlurWeakSeparation)"
                             elif mid_texture_ambiguous:
                                 quality_metrics['quality_reject_reason'] = "quality_影像模糊_(BlurFace)"
                             elif side_face_ambiguous:
