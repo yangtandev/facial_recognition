@@ -1058,7 +1058,7 @@ def analyze_eye_occlusion(frame, mesh_points=None, box=None, gaze_status=None):
             sunglasses_resolution_ok and
             both_eyes_dark and
             face_mean >= 75 and
-            band_stats["dark_ratio"] > 0.52 and
+            band_stats["dark_ratio"] > 0.65 and # [2026-06-10 Fix] Relax from 0.52 to prevent clear glasses with thick dark frames from triggering
             (
                 band_stats["specular_ratio"] > 0.003 or
                 band_stats["edge_density"] > 0.018 or
@@ -1081,7 +1081,7 @@ def analyze_eye_occlusion(frame, mesh_points=None, box=None, gaze_status=None):
             band_stats["dark_ratio"] > 0.58 and
             band_stats["very_dark_ratio"] > 0.42 and
             band_stats["skin_ratio"] < max(0.55, face_stats["skin_ratio"] - 0.18) and
-            min(left_stats["dark_ratio"], right_stats["dark_ratio"]) > 0.52 and # [2026-06-09 Fix v5] Relax from 0.58 to catch W377 sunglasses
+            min(left_stats["dark_ratio"], right_stats["dark_ratio"]) > 0.58 and # [2026-06-10 Fix] Revert to 0.58 to spare clear glasses with glare
             min(left_stats["very_dark_ratio"], right_stats["very_dark_ratio"]) > 0.32 and
             band_stats["edge_density"] > 0.012
         )
@@ -1119,13 +1119,13 @@ def analyze_eye_occlusion(frame, mesh_points=None, box=None, gaze_status=None):
         )
         left_skin_shaded = (
             left_stats["skin_ratio"] > 0.65 and # [2026-06-09 Fix v5] Real uncovered eye might have lower skin ratio
-            left_stats["dark_ratio"] > 0.20 and
+            left_stats["dark_ratio"] > 0.35 and # [2026-06-10 Fix] Relax from 0.20 to avoid catching normal eye shadows
             left_stats["very_dark_ratio"] > 0.06 and
             left_stats["mean_y"] < face_mean - 5.0
         )
         right_skin_shaded = (
             right_stats["skin_ratio"] > 0.65 and # [2026-06-09 Fix v5]
-            right_stats["dark_ratio"] > 0.20 and
+            right_stats["dark_ratio"] > 0.35 and # [2026-06-10 Fix]
             right_stats["very_dark_ratio"] > 0.06 and
             right_stats["mean_y"] < face_mean - 5.0
         )
@@ -1133,8 +1133,8 @@ def analyze_eye_occlusion(frame, mesh_points=None, box=None, gaze_status=None):
             face_box_w >= 430.0 and
             eye_dist > 150 and
             band_stats["skin_ratio"] > 0.85 and # [2026-06-09 Fix v5] Reduce from 0.88
-            band_stats["skin_ratio"] - face_stats["skin_ratio"] > 0.03 and # [2026-06-09 Fix v5] Relax from 0.06
-            band_stats["dark_ratio"] < 0.22 and # [2026-06-09 Fix v5] Relax from 0.20
+            band_stats["skin_ratio"] - face_stats["skin_ratio"] > 0.08 and # [2026-06-10 Fix] Relax from 0.03 to 0.08
+            band_stats["dark_ratio"] < 0.25 and # [2026-06-10 Fix] Relax from 0.22
             band_stats["specular_ratio"] < 0.003 and
             (
                 abs(left_stats["mean_y"] - right_stats["mean_y"]) > 16.0 or
@@ -2627,15 +2627,60 @@ def analyze_face_blur(frame, box, pose=None):
             lap < 23 and
             tenengrad < 430
         )
+        dark_low_texture_blur = (
+            lap < 25 and
+            tenengrad < 500 and # [2026-06-10 Fix] Strict tenengrad to separate clear large faces (ten=535) from blurry (ten=493)
+            bright_ratio < 0.08 and
+            very_bright_ratio < 0.02
+        )
         huge_face_low_texture_blur = (
             face_w >= 540 and
-            lap < 30 and
-            tenengrad < 600 and
-            bright_ratio < 0.30 # [2026-06-09 Fix v7] Relax to 0.30 to catch W560 blur (br=0.228), while keeping hand occlusion (br>0.33) safe
+            lap < 11.5 and # [2026-06-10 Fix] Relax to 11.5 to spare clear massive faces
+            tenengrad < 400 and
+            bright_ratio < 0.15 # [2026-06-10 Fix] Revert to 0.15 to avoid catching reflective vests
         )
 
+        # [2026-06-10] Rain droplet blur: water droplets on lens cover distort/occlude
+        # facial features. Global Laplacian may be normal or even high (droplet edges
+        # create contrast), but eye-region texture is severely degraded and many
+        # scattered small bright blobs appear from droplet reflections.
+        rain_droplet_blur = False
+        rain_eye_lap = 0.0
+        rain_eye_ten = 0.0
+        rain_blob_count = 0
+        if face_w >= 450:
+            face_roi_h = face.shape[0]
+            face_gray = cv2.cvtColor(face, cv2.COLOR_BGR2GRAY)
+            eye_y1_r = int(face_roi_h * 0.2)
+            eye_y2_r = int(face_roi_h * 0.45)
+            eye_region = face_gray[eye_y1_r:eye_y2_r, :]
+            if eye_region.size > 0:
+                rain_eye_lap = float(cv2.Laplacian(eye_region, cv2.CV_64F).var())
+                sobel_ex = cv2.Sobel(eye_region, cv2.CV_64F, 1, 0, ksize=3)
+                sobel_ey = cv2.Sobel(eye_region, cv2.CV_64F, 0, 1, ksize=3)
+                rain_eye_ten = float(np.mean(sobel_ex ** 2 + sobel_ey ** 2))
+
+                bright_mask_r = (face_gray > 180).astype(np.uint8)
+                num_labels_r, _, blob_stats_r, _ = cv2.connectedComponentsWithStats(bright_mask_r, 8)
+                rain_blob_count = sum(
+                    1 for i in range(1, num_labels_r)
+                    if 5 < blob_stats_r[i, cv2.CC_STAT_AREA] < 200
+                )
+
+                rain_droplet_blur = (
+                    rain_blob_count >= 40 and
+                    rain_eye_ten < 300
+                ) or (
+                    rain_blob_count >= 30 and
+                    rain_eye_ten < 250
+                ) or (
+                    rain_blob_count >= 35 and # [2026-06-10 Fix] 20->35: prevent slight texture/sweat/glasses from triggering
+                    rain_eye_ten < 350 and
+                    face_w >= 500
+                )
+
         return {
-            "is_blur": bool(severe_low_texture_blur or mid_low_texture_blur or low_light_small_face_blur or low_light_tiny_face_blur or bright_tiny_face_low_texture_blur or bright_small_face_low_texture_blur or frontal_bright_low_texture_blur or bright_low_texture_blur or visible_low_texture_blur or glare_smear_blur or blur_small_face_glare or side_motion_blur or large_frontal_low_texture_blur or huge_face_low_texture_blur),
+            "is_blur": bool(severe_low_texture_blur or mid_low_texture_blur or low_light_small_face_blur or low_light_tiny_face_blur or bright_tiny_face_low_texture_blur or bright_small_face_low_texture_blur or frontal_bright_low_texture_blur or bright_low_texture_blur or visible_low_texture_blur or glare_smear_blur or blur_small_face_glare or side_motion_blur or large_frontal_low_texture_blur or huge_face_low_texture_blur or dark_low_texture_blur or rain_droplet_blur),
             "laplacian": lap,
             "tenengrad": tenengrad,
             "pose_yaw_abs": pose_yaw,
@@ -2656,6 +2701,10 @@ def analyze_face_blur(frame, box, pose=None):
             "side_motion_blur": bool(side_motion_blur),
             "large_frontal_low_texture_blur": bool(large_frontal_low_texture_blur),
             "huge_face_low_texture_blur": bool(huge_face_low_texture_blur),
+            "rain_droplet_blur": bool(rain_droplet_blur),
+            "rain_eye_laplacian": rain_eye_lap,
+            "rain_eye_tenengrad": rain_eye_ten,
+            "rain_blob_count": rain_blob_count,
         }
     except Exception as e:
         LOGGER.error(f"Face blur analysis failed: {e}")

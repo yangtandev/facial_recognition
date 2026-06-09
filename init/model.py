@@ -1537,18 +1537,18 @@ class Comparison:
 
             strict_low_head_large_face = (
                 face_w >= 540 and
-                v_ratio < 0.42 and
+                v_ratio < 0.37 and # [2026-06-10 Fix] 0.42->0.37: Prevent pursed lips from triggering low head
                 current_ear > 0.24
             )
             low_head_side_geometry = (
                 face_w >= 450 and
-                v_ratio < 0.46 and  # [2026-06-09 Fix Revert] 0.42→0.46: 12;58;00_In_周家豪 (v=0.44, yaw=20.8) 確為低頭
+                v_ratio < 0.43 and  # [2026-06-10 Fix] 0.46->0.43: Prevent slight turn + pursed lips from triggering low head
                 abs(metrics.get('yaw', 0.0)) > 18.0 and
                 current_ear > 0.24
             )
             low_head_gaze_geometry = (
                 face_w >= 540 and
-                v_ratio < 0.54 and
+                v_ratio < 0.35 and # [2026-06-10 Fix] 0.54->0.35: Extreme cases only to prevent slightly turned large faces from triggering
                 abs(metrics.get('yaw', 0.0)) > 10.0 and
                 abs(metrics.get('roll_angle', 0.0)) > 5.0 and
                 current_ear > 0.24
@@ -1614,12 +1614,12 @@ class Comparison:
                 face_w > 500 and
                 22.0 < abs(yaw) < 23.5 and
                 abs(roll) < 6.0 and
-                0.75 <= v_ratio < 0.88 and  # [2026-06-09 Fix] 0.95→0.88：防止V-Ratio正常(接近0.95)的微轉頭被誤殺
+                0.75 <= v_ratio < 0.86 and  # [2026-06-10 Fix] 0.88->0.86: Prevent strict rejection of micro-turns
                 current_ear > 0.20
             )
             medium_side_face_turn_reject = (
                 450 <= face_w < 500 and
-                23.2 < abs(yaw) < 23.5 and
+                24.5 < abs(yaw) < 24.8 and # [2026-06-10 Fix] 23.2->24.5: Relax threshold
                 abs(roll) < 6.0 and
                 0.85 <= v_ratio < 1.10 and
                 current_ear > 0.24
