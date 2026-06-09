@@ -1542,7 +1542,7 @@ class Comparison:
             )
             low_head_side_geometry = (
                 face_w >= 450 and
-                v_ratio < 0.42 and  # [2026-06-09 Fix] 0.46→0.42：轉頭>18°時V-Ratio漬看是投影壓縮，非真小頭
+                v_ratio < 0.46 and  # [2026-06-09 Fix Revert] 0.42→0.46: 12;58;00_In_周家豪 (v=0.44, yaw=20.8) 確為低頭
                 abs(metrics.get('yaw', 0.0)) > 18.0 and
                 current_ear > 0.24
             )
