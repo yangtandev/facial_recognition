@@ -119,6 +119,13 @@ class Say_:
                 pass
 
     def _fallback_voice_path(self, filename_base):
+        if filename_base.startswith("hint_"):
+            legacy_hint_path = os.path.join(self.path, f"_{filename_base}.mp3")
+            if os.path.isfile(legacy_hint_path) and os.path.getsize(legacy_hint_path) >= 100:
+                return legacy_hint_path
+            generic_face_hint_path = os.path.join(self.path, "hint_face_visible.mp3")
+            if os.path.isfile(generic_face_hint_path) and os.path.getsize(generic_face_hint_path) >= 100:
+                return generic_face_hint_path
         for suffix in ("_in", "_out", "_clothes"):
             if filename_base.endswith(suffix):
                 path = os.path.join(self.path, f"{suffix}.mp3")

@@ -150,6 +150,14 @@ class MediaPipeHandler:
             all_points.append(points_5)
         return np.array(all_boxes), np.array(all_probs), np.array(all_points)
 
+    def get_last_mesh_points(self, index=0):
+        if not hasattr(self, 'last_results') or not self.last_results.multi_face_landmarks:
+            return None
+        if index >= len(self.last_results.multi_face_landmarks):
+            return None
+        landmarks = self.last_results.multi_face_landmarks[index].landmark
+        return np.array([(lm.x * self.last_w, lm.y * self.last_h) for lm in landmarks], dtype=np.float32)
+
     def _calculate_gaze_ratio(self, landmarks, w, h):
         p = landmarks.landmark
         def get_projection_ratio(idx_start, idx_end, idx_point):

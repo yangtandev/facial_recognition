@@ -26,7 +26,11 @@ default_config = {
     "say": {
         "in": "請進入",
         "out": "請離開",
-        "clothes": "請正確著裝"
+        "clothes": "請正確著裝",
+        "hint_eye_occluded": "眼部遮擋",
+        "hint_nose_occluded": "鼻子被遮擋",
+        "hint_mouth_occluded": "嘴巴被遮擋",
+        "hint_nose_mouth_occluded": "口鼻被遮擋"
     },
     "inCamera": {
         "close": False,

@@ -73,6 +73,10 @@ HINT_VOICE_TEXTS = {
     "hint_backlight": "請遮擋背後光源",
     "hint_occlusion": "請對準鏡頭",
     "hint_unrecognized": "無法識別",
+    "hint_eye_occluded": "眼部遮擋",
+    "hint_nose_occluded": "鼻子被遮擋",
+    "hint_mouth_occluded": "嘴巴被遮擋",
+    "hint_nose_mouth_occluded": "口鼻被遮擋",
 }
 
 

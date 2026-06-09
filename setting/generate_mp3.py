@@ -24,7 +24,9 @@ for file in os.listdir(path):
 
 name = ""
 for key in CONFIG["say"].keys():
+    txt = CONFIG['say'][key]
     if "name_" in CONFIG['say'][key]:
         txt = txt[5:]
     tts = gTTS(text=txt, lang='zh-tw')
-    tts.save(os.path.join(save_path, f"{name}_{key}.mp3"))
+    filename = f"{name}_{key}.mp3" if name else f"{key}.mp3"
+    tts.save(os.path.join(save_path, filename))

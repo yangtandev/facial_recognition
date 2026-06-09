@@ -18,6 +18,9 @@ from init.function import (
     analyze_low_light,
     analyze_backlight_glare,
     analyze_face_blur,
+    analyze_face_occlusion,
+    analyze_head_cover_shadow,
+    describe_face_occlusion,
     crop_face_without_forehead,
     enhance_low_light_frame,
     frame_hash,
@@ -322,6 +325,10 @@ class Detector:
                             "captured_at": datetime.now(self.TIMEZONE).isoformat(),
                             "shape": list(new_frame.shape),
                         }
+                        mesh_points = self.mp_handler.get_last_mesh_points(0)
+                        if mesh_points is not None:
+                            packet_meta["mesh_points"] = mesh_points.tolist()
+                            packet_meta["mesh_point_count"] = int(len(mesh_points))
                         self.system.state.frame_data[self.frame_num] = (
                             new_frame, g_status, box, points, legacy_face_zoom_flag, packet_meta)
                     else:
@@ -1081,6 +1088,41 @@ class Comparison:
     def _is_backlight_quality_msg(msg):
         return "背後光源" in msg or "BacklightGlare" in msg or "光源散射" in msg
 
+    def _quality_hint_payload(self, quality_msg, quality_metrics=None):
+        face_detail = None
+        if isinstance(quality_metrics, dict):
+            face_detail = quality_metrics.get("face_occlusion_detail")
+        if isinstance(face_detail, dict):
+            return (
+                face_detail.get("display_text", "請完整露出臉部"),
+                face_detail.get("voice_text", "請完整露出臉部"),
+                face_detail.get("voice_key", "hint_face_visible"),
+            )
+
+        if "低頭" in quality_msg:
+            return "請抬頭", "請抬頭", "hint_look_up"
+        if "抬頭" in quality_msg:
+            return "請低頭", "請低頭", "hint_look_down"
+        if "未置中" in quality_msg:
+            return "請站到中間", "請站到中間", "hint_center"
+        if (
+            "完整露出" in quality_msg or
+            "FaceBoundaryClipped" in quality_msg or
+            "特徵點被切除" in quality_msg or
+            "眼部遮擋" in quality_msg or
+            "臉部遮擋" in quality_msg
+        ):
+            return "請完整露出臉部", "請完整露出臉部", "hint_face_visible"
+        if "影像模糊" in quality_msg:
+            return "無法識別", "無法識別", "hint_unrecognized"
+        if "斜視" in quality_msg or "未正視" in quality_msg or "側臉" in quality_msg:
+            return "請正視鏡頭", "請正視鏡頭", "hint_look_straight"
+        if "光線直射" in quality_msg:
+            return "光線直射 請遮擋", "光線直射請遮擋", "hint_sunset"
+        if "背後光源" in quality_msg or "BacklightGlare" in quality_msg:
+            return "請遮擋背後光源", "請遮擋背後光源", "hint_backlight"
+        return "請對準鏡頭", "請對準鏡頭", "hint_occlusion"
+
     def _show_unrecognized_hint(
             self, now, camera_name, reason, confidence=0.0,
             z_score=0.0, gap=0.0):
@@ -1289,7 +1331,7 @@ class Comparison:
             f"seen={int(state.get('seen_count', 0))}, elapsed={elapsed:.2f}s")
         return False
 
-    def check_face_quality(self, box, points, frame_w, frame_h, gaze_status):
+    def check_face_quality(self, box, points, frame_w, frame_h, gaze_status, mesh_points=None):
         """
         評估人臉品質並計算懲罰係數。
 
@@ -1328,6 +1370,10 @@ class Comparison:
             'pitch_check': 'Pass',
             'yaw_check': 'Pass'
         }
+        deferred_quality_rejects = []
+
+        def defer_quality_reject(priority, msg):
+            deferred_quality_rejects.append((int(priority), str(msg)))
 
         if offset > limit_offset:
             return 0.0, f"未置中 (偏離 {offset:.1f}px > 容許 {limit_offset:.1f}px)", metrics
@@ -1351,6 +1397,7 @@ class Comparison:
         # Local import to avoid circular dependency
         from init.function import is_sunset_condition
 
+        frame_to_use = None
         # 由於此檢查需要 crop ROI，為了效能，只在人臉足夠大時執行
         if face_w > 100:
             frame_to_use = self.system.state.frame_mtcnn[self.frame_num]
@@ -1361,15 +1408,27 @@ class Comparison:
                 if is_sunset_condition(frame_to_use, box, points):
                     return 0.0, "光線直射 (Sunset Mode)", metrics
 
-                backlight_metrics = analyze_backlight_glare(frame_to_use, box)
-                metrics['backlight_glare'] = backlight_metrics
-                if backlight_metrics.get("is_backlight_glare", False):
-                    return 0.0, "背後光源散射 (BacklightGlare)", metrics
-
-                blur_metrics = analyze_face_blur(frame_to_use, box)
+                pose_for_blur = None
+                if gaze_status and len(gaze_status) >= 3:
+                    pose_for_blur = gaze_status[2]
+                blur_metrics = analyze_face_blur(
+                    frame_to_use, box, pose=pose_for_blur)
                 metrics['face_blur'] = blur_metrics
                 if blur_metrics.get("is_blur", False):
                     return 0.0, "影像模糊 (BlurFace)", metrics
+
+                head_cover_shadow_metrics = analyze_head_cover_shadow(
+                    frame_to_use, mesh_points=mesh_points, points=points, box=box)
+                metrics['head_cover_shadow'] = head_cover_shadow_metrics
+                if head_cover_shadow_metrics.get("is_head_cover_shadow", False):
+                    # [2026-06-09 Fix] Defer to allow FaceOcclusion precedence
+                    deferred_quality_rejects.append((85, "臉部陰影過重 (HeadCoverShadow)"))
+
+                backlight_metrics = analyze_backlight_glare(frame_to_use, box)
+                metrics['backlight_glare'] = backlight_metrics
+                if backlight_metrics.get("is_backlight_glare", False):
+                    # [2026-06-09 Fix] Defer to allow FaceOcclusion (like hand covering eyes) to take precedence
+                    deferred_quality_rejects.append((80, "背後光源散射 (BacklightGlare)"))
 
         # ---------------------------------------------------------
         # 3. 3D 姿態與視線檢查 (Gaze & Pose Check) - 核心邏輯
@@ -1411,7 +1470,8 @@ class Comparison:
                 metrics['is_bad_pose'] = is_bad_pose
 
                 if abs(yaw) > 23.5 and face_w > 430:
-                    return 0.0, f"未正視鏡頭 (SideFaceGeometry Yaw:{yaw:.1f})", metrics
+                    defer_quality_reject(
+                        60, f"未正視鏡頭 (SideFaceGeometry Yaw:{yaw:.1f})")
 
                 low_light_side_face = (
                     metrics.get('quality_low_light', {}).get('too_dark', False) and
@@ -1432,10 +1492,11 @@ class Comparison:
                     )
                 )
                 if low_light_side_face:
-                    return 0.0, f"未正視鏡頭 (LowLightSideFace Yaw:{yaw:.1f})", metrics
+                    defer_quality_reject(
+                        60, f"未正視鏡頭 (LowLightSideFace Yaw:{yaw:.1f})")
 
                 if not is_looking:
-                    return 0.0, f"{gaze_msg}", metrics
+                    defer_quality_reject(50, f"{gaze_msg}")
 
                 # [2026-05-04 Fix v2] 極端姿態硬攔截
                 # 根據實測校正：yaw 25~28° 的照片仍可正常辨識 (6 張實證)，
@@ -1444,7 +1505,8 @@ class Comparison:
                 is_extreme_pose = abs(yaw) > 30 or abs(
                     pitch) > 25 or abs(roll) > 25
                 if is_extreme_pose:
-                    return 0.0, f"姿態不良 (Yaw:{yaw:.1f}° Pitch:{pitch:.1f}° Roll:{roll:.1f}°)", metrics
+                    defer_quality_reject(
+                        65, f"姿態不良 (Yaw:{yaw:.1f}° Pitch:{pitch:.1f}° Roll:{roll:.1f}°)")
             else:
                 # [2026-01-11 Fix] 若無 Gaze 狀態 (可能因 Race Condition 被清空)，嚴格禁止放行
                 return 0.0, "Gaze Status Missing", metrics
@@ -1470,7 +1532,43 @@ class Comparison:
             # 殺死 9 張極端低頭測試照 (V < 0.35)
             if v_ratio < 0.35:
                 metrics['pitch_check'] = 'Fail (Extreme Low)'
-                return 0.0, f"低頭 (V-Ratio: {v_ratio:.2f} < 0.35)", metrics
+                defer_quality_reject(
+                    55, f"低頭 (V-Ratio: {v_ratio:.2f} < 0.35)")
+
+            strict_low_head_large_face = (
+                face_w >= 540 and
+                v_ratio < 0.42 and
+                current_ear > 0.24
+            )
+            low_head_side_geometry = (
+                face_w >= 450 and
+                v_ratio < 0.42 and  # [2026-06-09 Fix] 0.46→0.42：轉頭>18°時V-Ratio漬看是投影壓縮，非真小頭
+                abs(metrics.get('yaw', 0.0)) > 18.0 and
+                current_ear > 0.24
+            )
+            low_head_gaze_geometry = (
+                face_w >= 540 and
+                v_ratio < 0.54 and
+                abs(metrics.get('yaw', 0.0)) > 10.0 and
+                abs(metrics.get('roll_angle', 0.0)) > 5.0 and
+                current_ear > 0.24
+            )
+            metrics['strict_low_head_large_face'] = bool(
+                strict_low_head_large_face)
+            metrics['low_head_side_geometry'] = bool(low_head_side_geometry)
+            metrics['low_head_gaze_geometry'] = bool(low_head_gaze_geometry)
+            if strict_low_head_large_face:
+                metrics['pitch_check'] = 'Fail (Strict Low Head Large Face)'
+                defer_quality_reject(
+                    58, f"低頭 (V-Ratio: {v_ratio:.2f} < 0.40)")
+            if low_head_side_geometry:
+                metrics['pitch_check'] = 'Fail (Low Head Side Geometry)'
+                defer_quality_reject(
+                    58, f"低頭 (V-Ratio: {v_ratio:.2f}, Yaw:{metrics.get('yaw', 0.0):.1f})")
+            if low_head_gaze_geometry:
+                metrics['yaw_check'] = 'Fail (Low Head Gaze Geometry)'
+                defer_quality_reject(
+                    58, f"斜視 (FaceGeometry V:{v_ratio:.2f}, Yaw:{metrics.get('yaw', 0.0):.1f})")
 
             # 2. 低頭+遮眼 Combo 過濾 (0.35 <= V < 0.42)
             # [2026-01-22] 針對灰色地帶進行補刀
@@ -1481,7 +1579,8 @@ class Comparison:
                 # [2026-01-26 Refactor] Use pre-extracted EAR
                 if current_ear < 0.22:
                     metrics['pitch_check'] = 'Fail (Combo Low+Cover)'
-                    return 0.0, f"低頭/遮眼 (V {v_ratio:.2f}<0.42 & EAR {current_ear:.2f}<0.22)", metrics
+                    defer_quality_reject(
+                        58, f"低頭/遮眼 (V {v_ratio:.2f}<0.42 & EAR {current_ear:.2f}<0.22)")
 
             # [2026-05-04 Fix v2] 抬頭/眼睛超出畫面上限過濾
             # 根因：當人抬頭或仰頭使眼睛離開畫面時，v_ratio 會異常升高。
@@ -1489,7 +1588,8 @@ class Comparison:
             # [校正] 門檻從 1.5 提升至 1.6 (v=1.52 實測為正常人臉)。
             if v_ratio > 1.6:
                 metrics['pitch_check'] = 'Fail (Eyes Out of Frame)'
-                return 0.0, f"抬頭/眼睛超出畫面 (V-Ratio: {v_ratio:.2f} > 1.6)", metrics
+                defer_quality_reject(
+                    55, f"抬頭/眼睛超出畫面 (V-Ratio: {v_ratio:.2f} > 1.6)")
 
         if 'yaw' in metrics:
             yaw = metrics.get('yaw', 0.0)
@@ -1510,6 +1610,39 @@ class Comparison:
                 large_side_face_risk or medium_side_face_risk)
             metrics['large_side_face_risk'] = bool(large_side_face_risk)
             metrics['medium_side_face_risk'] = bool(medium_side_face_risk)
+            large_side_face_turn_reject = (
+                face_w > 500 and
+                22.0 < abs(yaw) < 23.5 and
+                abs(roll) < 6.0 and
+                0.75 <= v_ratio < 0.88 and  # [2026-06-09 Fix] 0.95→0.88：防止V-Ratio正常(接近0.95)的微轉頭被誤殺
+                current_ear > 0.20
+            )
+            medium_side_face_turn_reject = (
+                450 <= face_w < 500 and
+                23.2 < abs(yaw) < 23.5 and
+                abs(roll) < 6.0 and
+                0.85 <= v_ratio < 1.10 and
+                current_ear > 0.24
+            )
+            strict_large_side_face_turn_reject = (
+                face_w > 500 and
+                abs(yaw) > 24.0 and  # [2026-06-09 Fix] 22.0→24.0：Yaw 22~24°為微轉頭非側臉，用戶肣眼判斷為正視
+                abs(roll) < 6.0 and
+                v_ratio < 0.72 and
+                current_ear > 0.24
+            )
+            metrics['large_side_face_turn_reject'] = bool(
+                large_side_face_turn_reject)
+            metrics['medium_side_face_turn_reject'] = bool(
+                medium_side_face_turn_reject)
+            metrics['strict_large_side_face_turn_reject'] = bool(
+                strict_large_side_face_turn_reject)
+            if large_side_face_turn_reject or strict_large_side_face_turn_reject:
+                defer_quality_reject(
+                    60, f"未正視鏡頭 (SideFaceGeometryV2 Yaw:{yaw:.1f}, V:{v_ratio:.2f})")
+            if medium_side_face_turn_reject:
+                defer_quality_reject(
+                    60, f"未正視鏡頭 (SideFaceGeometryV2 Yaw:{yaw:.1f}, V:{v_ratio:.2f})")
 
         # ---------------------------------------------------------
         # 3.2 閉眼檢查 (Eye Closure Check) - [2026-01-26 Fix]
@@ -1523,9 +1656,37 @@ class Comparison:
         #   根因：13;27;24 (EAR=0.139, v=0.44) 需被攔截
         #   避免誤殺：11;20;43 陳志杰 (EAR=0.12, v_ratio 正常~0.8+) 不受影響
         if current_ear < 0.11:
-            return 0.0, f"眼睛閉合 (EAR: {current_ear:.4f} < 0.11)", metrics
+            defer_quality_reject(
+                45, f"眼睛閉合 (EAR: {current_ear:.4f} < 0.11)")
         if current_ear < 0.15 and v_ratio < 0.60:
-            return 0.0, f"眼睛閉合+低頭 (EAR: {current_ear:.4f} < 0.15 & V-Ratio: {v_ratio:.2f} < 0.60)", metrics
+            defer_quality_reject(
+                45, f"眼睛閉合+低頭 (EAR: {current_ear:.4f} < 0.15 & V-Ratio: {v_ratio:.2f} < 0.60)")
+
+        # ---------------------------------------------------------
+        # 3.3 臉部特徵遮擋檢查
+        # ---------------------------------------------------------
+        # 放在模糊與姿態之後，避免轉頭/低頭/模糊造成的 landmark 失真
+        # 被誤命名成眼睛、鼻子或口鼻遮擋。
+        if face_w > 100 and frame_to_use is not None:
+            face_occlusion_metrics = analyze_face_occlusion(
+                frame_to_use, mesh_points=mesh_points, points=points, box=box,
+                gaze_status=gaze_status)
+            metrics['face_occlusion'] = face_occlusion_metrics
+            metrics['eye_occlusion'] = face_occlusion_metrics.get(
+                "eye_occlusion", {})
+            if face_occlusion_metrics.get("face_occluded", False):
+                face_occlusion_detail = describe_face_occlusion(
+                    face_occlusion_metrics)
+                metrics['face_occlusion_detail'] = face_occlusion_detail
+                return 0.0, face_occlusion_detail["quality_msg"], metrics
+
+        if deferred_quality_rejects:
+            deferred_quality_rejects.sort(key=lambda item: item[0], reverse=True)
+            metrics['deferred_quality_rejects'] = [
+                {"priority": priority, "msg": msg}
+                for priority, msg in deferred_quality_rejects
+            ]
+            return 0.0, deferred_quality_rejects[0][1], metrics
 
         # ---------------------------------------------------------
         # 4. 臉部區域清晰度檢查 (ROI Blur Detection)
@@ -1772,7 +1933,8 @@ class Comparison:
 
             # 檢查人臉品質 (同步版)
             quality_score, quality_msg, quality_metrics = self.check_face_quality(
-                _box, _points, frame_w, frame_h, _gaze_status)
+                _box, _points, frame_w, frame_h, _gaze_status,
+                mesh_points=_packet_meta.get("mesh_points"))
             quality_metrics["low_light"] = low_light_metrics
             quality_metrics["low_light_enhanced"] = low_light_enhanced
 
@@ -1827,36 +1989,10 @@ class Comparison:
                 if is_staff_displaying:
                     continue  # 免死金牌
 
-                if "低頭" in quality_msg:
-                    self.system.state.hint_text[self.frame_num] = "請抬頭"
-                    self.system.speaker.say("請抬頭", "hint_look_up", priority=2)
-                elif "抬頭" in quality_msg:
-                    self.system.state.hint_text[self.frame_num] = "請低頭"
-                    self.system.speaker.say(
-                        "請低頭", "hint_look_down", priority=2)
-                elif "未置中" in quality_msg:
-                    self.system.state.hint_text[self.frame_num] = "請站到中間"
-                    self.system.speaker.say("請站到中間", "hint_center", priority=2)
-                elif "完整露出" in quality_msg or "FaceBoundaryClipped" in quality_msg or "特徵點被切除" in quality_msg:
-                    self.system.state.hint_text[self.frame_num] = "請完整露出臉部"
-                    self.system.speaker.say(
-                        "請完整露出臉部", "hint_face_visible", priority=2)
-                elif "斜視" in quality_msg or "未正視" in quality_msg or "側臉" in quality_msg or "影像模糊" in quality_msg:
-                    self.system.state.hint_text[self.frame_num] = "請正視鏡頭"
-                    self.system.speaker.say(
-                        "請正視鏡頭", "hint_look_straight", priority=2)
-                elif "光線直射" in quality_msg:
-                    self.system.state.hint_text[self.frame_num] = "光線直射 請遮擋"
-                    self.system.speaker.say(
-                        "光線直射請遮擋", "hint_sunset", priority=2)
-                elif "背後光源" in quality_msg or "BacklightGlare" in quality_msg:
-                    self.system.state.hint_text[self.frame_num] = "請遮擋背後光源"
-                    self.system.speaker.say(
-                        "請遮擋背後光源", "hint_backlight", priority=2)
-                else:
-                    self.system.state.hint_text[self.frame_num] = "請對準鏡頭"
-                    self.system.speaker.say(
-                        "請對準鏡頭", "hint_occlusion", priority=2)
+                hint_text, voice_text, voice_key = self._quality_hint_payload(
+                    quality_msg, quality_metrics)
+                self.system.state.hint_text[self.frame_num] = hint_text
+                self.system.speaker.say(voice_text, voice_key, priority=2)
 
                 self.hint_clear_time = now + 1.0
                 continue
