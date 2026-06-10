@@ -143,10 +143,12 @@ class Detector:
                 periods = [{"start": start_str, "end": end_str}]
 
             for period in periods:
-                start_time = datetime.strptime(
-                    period.get("start", "00:00"), "%H:%M").time()
-                end_time = datetime.strptime(
-                    period.get("end", "00:00"), "%H:%M").time()
+                s_str = period.get("start", "00:00")
+                e_str = period.get("end", "00:00")
+                s_str = s_str if s_str.count(':') == 2 else s_str + ':00'
+                e_str = e_str if e_str.count(':') == 2 else e_str + ':00'
+                start_time = datetime.strptime(s_str, "%H:%M:%S").time()
+                end_time = datetime.strptime(e_str, "%H:%M:%S").time()
                 if start_time <= end_time:
                     if start_time <= now_time <= end_time:
                         return True

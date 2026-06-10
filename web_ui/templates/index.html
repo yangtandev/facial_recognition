@@ -293,8 +293,8 @@
 					<table id="schedTable">
 						<thead>
 							<tr>
-								<th>開始 (HH:MM)</th>
-								<th>結束 (HH:MM)</th>
+								<th>開始 (HH:MM:SS)</th>
+								<th>結束 (HH:MM:SS)</th>
 								<th>操作</th>
 							</tr>
 						</thead>
@@ -481,8 +481,8 @@
 				const tbody = document.querySelector('#schedTable tbody');
 				const tr = document.createElement('tr');
 				tr.innerHTML = `
-            <td><input type="time" class="p-start" value="${start}"></td>
-            <td><input type="time" class="p-end" value="${end}"></td>
+            <td><input type="time" class="p-start" step="1" value="${start}"></td>
+            <td><input type="time" class="p-end" step="1" value="${end}"></td>
             <td><button type="button" class="btn-del" onclick="this.closest('tr').remove()">刪除</button></td>
         `;
 				tbody.appendChild(tr);
