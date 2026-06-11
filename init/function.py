@@ -1060,16 +1060,19 @@ def analyze_eye_occlusion(frame, mesh_points=None, box=None, gaze_status=None):
             band_stats["very_dark_ratio"] > 0.28 and
             eye_mean < 75
         )
+        dark_lens_texture = (
+            band_stats["edge_density"] > 0.018 or
+            band_stats["very_dark_ratio"] > 0.18 or
+            min(left_stats["very_dark_ratio"], right_stats["very_dark_ratio"]) > 0.12
+        )
         dark_sunglasses_or_goggles = (
             sunglasses_resolution_ok and
             both_eyes_dark and
             face_mean >= 75 and
-            band_stats["dark_ratio"] > 0.65 and # [2026-06-10 Fix] Relax from 0.52 to prevent clear glasses with thick dark frames from triggering
-            (
-                band_stats["specular_ratio"] > 0.003 or
-                band_stats["edge_density"] > 0.018 or
-                band_stats["very_dark_ratio"] > 0.45
-            )
+            eye_darker_than_face and
+            band_stats["dark_ratio"] > 0.52 and
+            band_stats["skin_ratio"] < max(0.78, face_stats["skin_ratio"] - 0.08) and
+            dark_lens_texture
         )
 
         visible_clear_glasses = (
@@ -1346,10 +1349,6 @@ def analyze_eye_occlusion(frame, mesh_points=None, box=None, gaze_status=None):
                 result["occluded_eye_side"] = "both"
             return result
 
-        if shadowed_but_skin_visible:
-            result["reason"] = "shadowed_skin_visible"
-            return result
-
         if (
             opaque_eye_cover or
             very_dark_eye_cover or
@@ -1364,6 +1363,13 @@ def analyze_eye_occlusion(frame, mesh_points=None, box=None, gaze_status=None):
             else:
                 result["reason"] = "opaque_eye_cover"
             result["occluded_eye_side"] = "both"
+
+        if result["eye_occluded"]:
+            return result
+
+        if shadowed_but_skin_visible:
+            result["reason"] = "shadowed_skin_visible"
+            return result
 
         return result
     except Exception as e:
@@ -1503,6 +1509,208 @@ def analyze_face_occlusion(frame, mesh_points=None, points=None, box=None, gaze_
             face_stats["dark_ratio"] > 0.90 and
             face_stats["skin_ratio"] < 0.12
         )
+        near_lens_foreground_occlusion = False
+        near_lens_foreground_ratio = 0.0
+        near_lens_foreground_component_ratio = 0.0
+        if face_rect is not None and face_box_w >= 430.0:
+            fx1, fy1, fx2, fy2 = face_rect
+            fw = max(1, fx2 - fx1)
+            fh = max(1, fy2 - fy1)
+            side_rect = _clip_roi(
+                fx1 - fw * 0.65, fy1 - fh * 0.10,
+                fx1 + fw * 0.20, fy2 + fh * 0.05,
+                frame_w, frame_h)
+            if side_rect is not None:
+                sx1, sy1, sx2, sy2 = side_rect
+                side_roi = frame[sy1:sy2, sx1:sx2]
+                if side_roi.size > 0:
+                    side_ycrcb = cv2.cvtColor(side_roi, cv2.COLOR_BGR2YCrCb)
+                    side_y = side_ycrcb[:, :, 0]
+                    side_cr = side_ycrcb[:, :, 1]
+                    side_cb = side_ycrcb[:, :, 2]
+                    side_hsv = cv2.cvtColor(side_roi, cv2.COLOR_BGR2HSV)
+                    side_sat = side_hsv[:, :, 1]
+                    foreground_mask = (
+                        (side_y > 35) & (side_y < 190) &
+                        (side_cr > 135) & (side_cb < 135) &
+                        (side_sat > 45)
+                    )
+                    near_lens_foreground_ratio = float(
+                        np.mean(foreground_mask))
+                    labels_count, _, component_stats, _ = cv2.connectedComponentsWithStats(
+                        foreground_mask.astype(np.uint8), 8)
+                    max_component_area = 0
+                    for label_idx in range(1, labels_count):
+                        max_component_area = max(
+                            max_component_area,
+                            int(component_stats[label_idx, cv2.CC_STAT_AREA]))
+                    face_area = float(max(1, fw * fh))
+                    near_lens_foreground_component_ratio = float(
+                        max_component_area / face_area)
+                    near_lens_foreground_occlusion = (
+                        near_lens_foreground_component_ratio > 0.80 and
+                        near_lens_foreground_ratio > 0.80 and
+                        face_stats["skin_ratio"] > 0.60
+                    )
+        result["near_lens_foreground_occlusion"] = bool(
+            near_lens_foreground_occlusion)
+        result["near_lens_foreground_ratio"] = float(
+            near_lens_foreground_ratio)
+        result["near_lens_foreground_component_ratio"] = float(
+            near_lens_foreground_component_ratio)
+        near_face_foreground_occlusion = False
+        near_face_skin_component_ratio = 0.0
+        near_face_dark_component_ratio = 0.0
+        near_face_foreground_distance_ratio = 999.0
+        if face_rect is not None and face_box_w >= 330.0:
+            fx1, fy1, fx2, fy2 = face_rect
+            fw = max(1, fx2 - fx1)
+            fh = max(1, fy2 - fy1)
+            near_rect = _clip_roi(
+                fx1 - fw * 0.80, fy1 - fh * 0.15,
+                fx2 + fw * 0.80, fy2 + fh * 0.35,
+                frame_w, frame_h)
+            if near_rect is not None:
+                nx1, ny1, nx2, ny2 = near_rect
+                near_roi = frame[ny1:ny2, nx1:nx2]
+                if near_roi.size > 0:
+                    near_ycrcb = cv2.cvtColor(near_roi, cv2.COLOR_BGR2YCrCb)
+                    near_y = near_ycrcb[:, :, 0]
+                    near_cr = near_ycrcb[:, :, 1]
+                    near_cb = near_ycrcb[:, :, 2]
+                    near_hsv = cv2.cvtColor(near_roi, cv2.COLOR_BGR2HSV)
+                    near_sat = near_hsv[:, :, 1]
+                    outside_mask = np.ones(near_y.shape, dtype=np.uint8)
+                    lx1 = max(0, fx1 - nx1)
+                    lx2 = min(nx2 - nx1, fx2 - nx1)
+                    ly1 = max(0, fy1 - ny1)
+                    ly2 = min(ny2 - ny1, fy2 - ny1)
+                    if lx2 > lx1 and ly2 > ly1:
+                        outside_mask[ly1:ly2, lx1:lx2] = 0
+
+                    def _largest_near_component(mask_bool):
+                        labels_count, _, component_stats, _ = cv2.connectedComponentsWithStats(
+                            mask_bool.astype(np.uint8), 8)
+                        best = {
+                            "area": 0,
+                            "distance": float(max(frame_w, frame_h)),
+                            "side_adjacent": False,
+                            "vertical_overlap_ratio": 0.0,
+                            "width_ratio": 0.0,
+                            "height_ratio": 0.0,
+                        }
+                        for label_idx in range(1, labels_count):
+                            area = int(component_stats[label_idx, cv2.CC_STAT_AREA])
+                            cx = int(component_stats[label_idx, cv2.CC_STAT_LEFT])
+                            cy = int(component_stats[label_idx, cv2.CC_STAT_TOP])
+                            cw = int(component_stats[label_idx, cv2.CC_STAT_WIDTH])
+                            ch = int(component_stats[label_idx, cv2.CC_STAT_HEIGHT])
+                            ox1, oy1 = nx1 + cx, ny1 + cy
+                            ox2, oy2 = ox1 + cw, oy1 + ch
+                            dx = max(fx1 - ox2, ox1 - fx2, 0)
+                            dy = max(fy1 - oy2, oy1 - fy2, 0)
+                            dist = float((dx * dx + dy * dy) ** 0.5)
+                            vertical_overlap = max(
+                                0, min(oy2, fy2) - max(oy1, fy1))
+                            vertical_overlap_ratio = float(
+                                vertical_overlap / max(1, fh))
+                            right_side = ox1 >= fx2 - fw * 0.08
+                            left_side = ox2 <= fx1 + fw * 0.08
+                            horizontal_gap = min(
+                                abs(ox1 - fx2), abs(fx1 - ox2))
+                            side_adjacent = (
+                                (right_side or left_side) and
+                                horizontal_gap <= fw * 0.08 and
+                                vertical_overlap_ratio >= 0.30
+                            )
+                            if area > best["area"]:
+                                best = {
+                                    "area": area,
+                                    "distance": dist,
+                                    "side_adjacent": bool(side_adjacent),
+                                    "vertical_overlap_ratio": vertical_overlap_ratio,
+                                    "width_ratio": float(cw / max(1, fw)),
+                                    "height_ratio": float(ch / max(1, fh)),
+                                }
+                        return best
+
+                    valid_near = outside_mask.astype(bool)
+                    skin_like = (
+                        valid_near &
+                        (near_y > 35) & (near_y < 230) &
+                        (near_cr > 135) & (near_cb < 150) &
+                        (near_sat > 35)
+                    )
+                    dark_object = (
+                        valid_near &
+                        (near_y < 105) &
+                        (near_sat < 155)
+                    )
+                    skin_component = _largest_near_component(skin_like)
+                    dark_component = _largest_near_component(dark_object)
+                    skin_area = skin_component["area"]
+                    dark_area = dark_component["area"]
+                    face_area = float(max(1, fw * fh))
+                    near_face_skin_component_ratio = float(skin_area / face_area)
+                    near_face_dark_component_ratio = float(dark_area / face_area)
+                    near_face_foreground_distance_ratio = float(
+                        min(skin_component["distance"], dark_component["distance"]) /
+                        max(1, fw))
+                    side_dark_object = (
+                        dark_component["side_adjacent"] and
+                        near_face_dark_component_ratio > 0.28 and
+                        dark_component["vertical_overlap_ratio"] > 0.36 and
+                        dark_component["height_ratio"] > 0.35 and
+                        face_box_w < 430.0 and
+                        face_stats["edge_density"] > 0.050 and
+                        face_stats["skin_ratio"] > 0.93 and
+                        local_v_ratio < 0.70
+                    )
+                    side_hand_foreground = (
+                        skin_component["side_adjacent"] and
+                        near_face_skin_component_ratio > 1.35 and
+                        skin_component["vertical_overlap_ratio"] > 0.45 and
+                        skin_component["height_ratio"] > 0.75
+                    )
+                    center_hand_foreground = (
+                        near_face_skin_component_ratio > 1.35 and
+                        skin_component["vertical_overlap_ratio"] > 0.85 and
+                        skin_component["height_ratio"] > 1.20 and
+                        face_box_w < 430.0 and
+                        face_stats["std_y"] > 35.0 and
+                        lower_stats["std_y"] > 32.0 and
+                        lower_stats["edge_density"] < 0.012
+                    )
+                    near_face_foreground_occlusion = (
+                        side_dark_object or
+                        side_hand_foreground or
+                        center_hand_foreground
+                    )
+                    result["near_face_side_dark_object"] = bool(side_dark_object)
+                    result["near_face_side_hand_foreground"] = bool(
+                        side_hand_foreground)
+                    result["near_face_center_hand_foreground"] = bool(
+                        center_hand_foreground)
+                    result["near_face_skin_side_adjacent"] = bool(
+                        skin_component["side_adjacent"])
+                    result["near_face_dark_side_adjacent"] = bool(
+                        dark_component["side_adjacent"])
+                    result["near_face_skin_vertical_overlap_ratio"] = float(
+                        skin_component["vertical_overlap_ratio"])
+                    result["near_face_dark_vertical_overlap_ratio"] = float(
+                        dark_component["vertical_overlap_ratio"])
+                    result["near_face_skin_height_ratio"] = float(
+                        skin_component["height_ratio"])
+                    result["near_face_dark_height_ratio"] = float(
+                        dark_component["height_ratio"])
+        result["near_face_foreground_occlusion"] = bool(
+            near_face_foreground_occlusion)
+        result["near_face_skin_component_ratio"] = float(
+            near_face_skin_component_ratio)
+        result["near_face_dark_component_ratio"] = float(
+            near_face_dark_component_ratio)
+        result["near_face_foreground_distance_ratio"] = float(
+            near_face_foreground_distance_ratio)
 
         lower_much_darker = (
             generic_lower_resolution_ok and
@@ -1858,13 +2066,19 @@ def analyze_face_occlusion(frame, mesh_points=None, points=None, box=None, gaze_
             patterned_lower_cover_bright or
             skin_colored_lower_cover or
             skin_colored_mouth_cover or
-            skin_colored_nose_cover
+            skin_colored_nose_cover or
+            near_lens_foreground_occlusion or
+            near_face_foreground_occlusion
         )
 
         if lower_face_occluded:
             result["lower_face_occluded"] = True
             result["face_occluded"] = True
-            if visible_nose_mouth_cover:
+            if near_face_foreground_occlusion:
+                result["reason"] = "near_face_foreground_occlusion"
+            elif near_lens_foreground_occlusion:
+                result["reason"] = "near_lens_foreground_occlusion"
+            elif visible_nose_mouth_cover:
                 result["reason"] = "visible_nose_mouth_cover"
             elif mask_nose_mouth_cover:
                 result["reason"] = "mask_nose_mouth_cover"
@@ -2338,6 +2552,76 @@ def analyze_backlight_glare(frame, box):
         face_lap = float(cv2.Laplacian(face_gray, cv2.CV_64F).var())
 
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        near_x1 = max(0, x1 - int(fw * 0.90))
+        near_x2 = min(w, x2 + int(fw * 0.90))
+        near_y1 = max(0, y1 - int(fh * 0.35))
+        near_y2 = min(h, y2 + int(fh * 0.45))
+        near_y = y_channel[near_y1:near_y2, near_x1:near_x2]
+        near_hot_ratio = 0.0
+        near_hot_component_ratio = 0.0
+        near_hot_distance_ratio = 999.0
+        if near_y.size:
+            near_mask = np.ones(near_y.shape, dtype=np.uint8)
+            nfx1 = max(0, fx1 - near_x1)
+            nfx2 = min(near_x2 - near_x1, fx2 - near_x1)
+            nfy1 = max(0, fy1 - near_y1)
+            nfy2 = min(near_y2 - near_y1, fy2 - near_y1)
+            if nfx2 > nfx1 and nfy2 > nfy1:
+                near_mask[nfy1:nfy2, nfx1:nfx2] = 0
+            near_valid = near_mask.astype(bool)
+            near_hot = ((near_y > 245) & near_valid).astype(np.uint8)
+            valid_count = max(1, int(np.count_nonzero(near_valid)))
+            near_hot_ratio = float(np.count_nonzero(near_hot) / valid_count)
+            num, _, stats, _ = cv2.connectedComponentsWithStats(near_hot, 8)
+            largest_area = 0
+            nearest_distance = float(max(w, h))
+            for label_idx in range(1, num):
+                area = int(stats[label_idx, cv2.CC_STAT_AREA])
+                bx = int(stats[label_idx, cv2.CC_STAT_LEFT])
+                by = int(stats[label_idx, cv2.CC_STAT_TOP])
+                bw = int(stats[label_idx, cv2.CC_STAT_WIDTH])
+                bh = int(stats[label_idx, cv2.CC_STAT_HEIGHT])
+                ox1, oy1 = near_x1 + bx, near_y1 + by
+                ox2, oy2 = ox1 + bw, oy1 + bh
+                dx = max(x1 - ox2, ox1 - x2, 0)
+                dy = max(y1 - oy2, oy1 - y2, 0)
+                dist = float((dx * dx + dy * dy) ** 0.5)
+                if area > largest_area:
+                    largest_area = area
+                    nearest_distance = dist
+            near_hot_component_ratio = float(largest_area / max(1, fw * fh))
+            near_hot_distance_ratio = float(nearest_distance / max(1, fw))
+
+        face_hsv = hsv[fy1:fy2, fx1:fx2]
+        upper_y1 = int(fh * 0.12)
+        upper_y2 = max(upper_y1 + 1, int(fh * 0.62))
+        upper_y = face_y[upper_y1:upper_y2, :]
+        upper_s = face_hsv[upper_y1:upper_y2, :, 1]
+        upper_h = face_hsv[upper_y1:upper_y2, :, 0]
+        face_flare_streak_ratio = 0.0
+        face_flare_component_ratio = 0.0
+        face_flare_span_ratio = 0.0
+        if upper_y.size:
+            flare_mask = (
+                ((upper_y > 170) & (upper_s < 95)) |
+                ((upper_y > 150) & (upper_s > 20) &
+                 (upper_h >= 75) & (upper_h <= 120))
+            ).astype(np.uint8)
+            face_flare_streak_ratio = float(np.mean(flare_mask))
+            num, _, stats, _ = cv2.connectedComponentsWithStats(
+                flare_mask, 8)
+            largest_area = 0
+            largest_width = 0
+            for label_idx in range(1, num):
+                area = int(stats[label_idx, cv2.CC_STAT_AREA])
+                comp_width = int(stats[label_idx, cv2.CC_STAT_WIDTH])
+                if area > largest_area:
+                    largest_area = area
+                    largest_width = comp_width
+            face_flare_component_ratio = float(
+                largest_area / max(1, upper_y.size))
+            face_flare_span_ratio = float(largest_width / max(1, fw))
+
         side_x1 = max(0, x1 - int(fw * 0.95))
         side_x2 = min(w, x2 + int(fw * 0.95))
         side_y1 = max(0, y1 - int(fh * 0.20))
@@ -2480,9 +2764,23 @@ def analyze_backlight_glare(frame, box):
             face_lap < 45 and
             contrast > 35
         )
+        near_face_source_present = (
+            fw >= 430 and
+            near_hot_component_ratio > 0.003 and
+            near_hot_distance_ratio < 0.08
+        )
+        face_flare_affected = (
+            face_flare_streak_ratio > 0.025 and
+            face_flare_component_ratio > 0.010 and
+            face_flare_span_ratio > 0.15
+        )
+        near_face_source_glare = (
+            near_face_source_present and
+            face_flare_affected
+        )
 
         return {
-            "is_backlight_glare": bool(dark_face_bright_bg or washed_face_glare or overhead_source_glare or side_source_glare or face_halo_glare),
+            "is_backlight_glare": bool(dark_face_bright_bg or washed_face_glare or overhead_source_glare or side_source_glare or face_halo_glare or near_face_source_glare),
             "face_mean_y": face_mean,
             "background_mean_y": bg_mean,
             "background_bright_ratio": bg_bright_ratio,
@@ -2508,6 +2806,15 @@ def analyze_backlight_glare(frame, box):
             "side_source_glare": bool(side_source_glare),
             "side_source_clear_face_suppressed": bool(side_source_clear_face_suppressed),
             "face_halo_glare": bool(face_halo_glare),
+            "near_hot_ratio": near_hot_ratio,
+            "near_hot_component_ratio": near_hot_component_ratio,
+            "near_hot_distance_ratio": near_hot_distance_ratio,
+            "near_face_source_present": bool(near_face_source_present),
+            "face_flare_streak_ratio": face_flare_streak_ratio,
+            "face_flare_component_ratio": face_flare_component_ratio,
+            "face_flare_span_ratio": face_flare_span_ratio,
+            "face_flare_affected": bool(face_flare_affected),
+            "near_face_source_glare": bool(near_face_source_glare),
         }
     except Exception as e:
         LOGGER.error(f"Backlight glare analysis failed: {e}")
@@ -2619,6 +2926,13 @@ def analyze_face_blur(frame, box, pose=None):
                 very_bright_ratio < 0.005
             )
         )
+        medium_face_low_texture_blur = (
+            400 <= face_w < 430 and
+            lap < 28 and
+            tenengrad < 700 and
+            bright_ratio < 0.05 and
+            very_bright_ratio < 0.02
+        )
         glare_smear_blur = face_w < 400 and lap < 50 and tenengrad > 1500 and very_bright_ratio > 0.15
         blur_small_face_glare = face_w < 340 and lap < 130 and tenengrad < 1400 and very_bright_ratio > 0.20
         side_motion_blur = (
@@ -2684,9 +2998,40 @@ def analyze_face_blur(frame, box, pose=None):
                     rain_eye_ten < 350 and
                     face_w >= 500
                 )
+        feature_low_texture_quality_risk = (
+            face_w >= 430 and
+            pose_yaw < 18.0 and
+            (
+                (
+                    lap < 30 and
+                    tenengrad < 1000 and
+                    rain_eye_lap < 15 and
+                    rain_eye_ten < 1000 and
+                    bright_ratio < 0.18 and
+                    very_bright_ratio < 0.08
+                ) or (
+                    lap < 48 and
+                    tenengrad < 950 and
+                    rain_eye_lap < 12 and
+                    rain_eye_ten < 700 and
+                    bright_ratio < 0.16 and
+                    very_bright_ratio < 0.07
+                )
+            )
+        )
+        wet_lens_low_texture_quality_risk = (
+            face_w >= 430 and
+            pose_yaw < 18.0 and
+            lap < 48 and
+            tenengrad < 1100 and
+            rain_eye_lap < 14 and
+            rain_eye_ten < 950 and
+            0.07 <= bright_ratio < 0.18 and
+            very_bright_ratio < 0.08
+        )
 
         return {
-            "is_blur": bool(severe_low_texture_blur or mid_low_texture_blur or low_light_small_face_blur or low_light_tiny_face_blur or bright_tiny_face_low_texture_blur or bright_small_face_low_texture_blur or frontal_bright_low_texture_blur or bright_low_texture_blur or visible_low_texture_blur or glare_smear_blur or blur_small_face_glare or side_motion_blur or large_frontal_low_texture_blur or huge_face_low_texture_blur or dark_low_texture_blur or rain_droplet_blur),
+            "is_blur": bool(severe_low_texture_blur or mid_low_texture_blur or low_light_small_face_blur or low_light_tiny_face_blur or bright_tiny_face_low_texture_blur or bright_small_face_low_texture_blur or frontal_bright_low_texture_blur or bright_low_texture_blur or visible_low_texture_blur or medium_face_low_texture_blur or glare_smear_blur or blur_small_face_glare or side_motion_blur or large_frontal_low_texture_blur or huge_face_low_texture_blur or dark_low_texture_blur or rain_droplet_blur),
             "laplacian": lap,
             "tenengrad": tenengrad,
             "pose_yaw_abs": pose_yaw,
@@ -2702,12 +3047,15 @@ def analyze_face_blur(frame, box, pose=None):
             "frontal_bright_low_texture_blur": bool(frontal_bright_low_texture_blur),
             "bright_low_texture_blur": bool(bright_low_texture_blur),
             "visible_low_texture_blur": bool(visible_low_texture_blur),
+            "medium_face_low_texture_blur": bool(medium_face_low_texture_blur),
             "glare_smear_blur": bool(glare_smear_blur),
             "blur_small_face_glare": bool(blur_small_face_glare),
             "side_motion_blur": bool(side_motion_blur),
             "large_frontal_low_texture_blur": bool(large_frontal_low_texture_blur),
             "huge_face_low_texture_blur": bool(huge_face_low_texture_blur),
             "rain_droplet_blur": bool(rain_droplet_blur),
+            "feature_low_texture_quality_risk": bool(feature_low_texture_quality_risk),
+            "wet_lens_low_texture_quality_risk": bool(wet_lens_low_texture_quality_risk),
             "rain_eye_laplacian": rain_eye_lap,
             "rain_eye_tenengrad": rain_eye_ten,
             "rain_blob_count": rain_blob_count,

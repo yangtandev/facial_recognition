@@ -58,7 +58,7 @@ CAMERA = {0: "inCamera", 1: "outCamera"}
 CAM_NAME_MAP = {0: "入口", 1: "出口"}
 POTENTIAL_MISS_RATIO = 0.8
 Z_SCORE_THRESHOLD = 1.5
-QUALITY_RULE_VERSION = "2026-05-29.1"
+QUALITY_RULE_VERSION = "2026-06-10.1"
 
 test_img = cv2.imread(os.path.join(
     os.path.dirname(__file__), "../other/test_img.jpg"))
@@ -1539,12 +1539,12 @@ class Comparison:
 
             strict_low_head_large_face = (
                 face_w >= 540 and
-                v_ratio < 0.37 and # [2026-06-10 Fix] 0.42->0.37: Prevent pursed lips from triggering low head
+                v_ratio < 0.39 and
                 current_ear > 0.24
             )
             low_head_side_geometry = (
                 face_w >= 450 and
-                v_ratio < 0.43 and  # [2026-06-10 Fix] 0.46->0.43: Prevent slight turn + pursed lips from triggering low head
+                v_ratio < 0.45 and
                 abs(metrics.get('yaw', 0.0)) > 18.0 and
                 current_ear > 0.24
             )
@@ -1592,6 +1592,17 @@ class Comparison:
                 metrics['pitch_check'] = 'Fail (Eyes Out of Frame)'
                 defer_quality_reject(
                     55, f"抬頭/眼睛超出畫面 (V-Ratio: {v_ratio:.2f} > 1.6)")
+            medium_high_head = (
+                340 <= face_w < 430 and
+                v_ratio > 1.18 and
+                box[1] > frame_h * 0.52 and
+                0.18 <= current_ear < 0.30
+            )
+            metrics['medium_high_head'] = bool(medium_high_head)
+            if medium_high_head:
+                metrics['pitch_check'] = 'Fail (Medium High Head)'
+                defer_quality_reject(
+                    55, f"抬頭 (HighHead V-Ratio: {v_ratio:.2f})")
 
         if 'yaw' in metrics:
             yaw = metrics.get('yaw', 0.0)
@@ -1633,13 +1644,21 @@ class Comparison:
                 v_ratio < 0.72 and
                 current_ear > 0.24
             )
+            large_low_v_side_face_reject = (
+                face_w >= 540 and
+                10.0 < abs(yaw) < 18.0 and
+                v_ratio < 0.55 and
+                current_ear > 0.24
+            )
             metrics['large_side_face_turn_reject'] = bool(
                 large_side_face_turn_reject)
             metrics['medium_side_face_turn_reject'] = bool(
                 medium_side_face_turn_reject)
             metrics['strict_large_side_face_turn_reject'] = bool(
                 strict_large_side_face_turn_reject)
-            if large_side_face_turn_reject or strict_large_side_face_turn_reject:
+            metrics['large_low_v_side_face_reject'] = bool(
+                large_low_v_side_face_reject)
+            if large_side_face_turn_reject or strict_large_side_face_turn_reject or large_low_v_side_face_reject:
                 defer_quality_reject(
                     60, f"未正視鏡頭 (SideFaceGeometryV2 Yaw:{yaw:.1f}, V:{v_ratio:.2f})")
             if medium_side_face_turn_reject:
@@ -1681,6 +1700,18 @@ class Comparison:
                     face_occlusion_metrics)
                 metrics['face_occlusion_detail'] = face_occlusion_detail
                 return 0.0, face_occlusion_detail["quality_msg"], metrics
+            eye_band_metrics = metrics.get('eye_occlusion', {}).get(
+                "eye_band", {})
+            visual_eye_closed = (
+                current_ear < 0.145 and
+                face_w >= 430 and
+                v_ratio < 0.85 and
+                eye_band_metrics.get("skin_ratio", 0.0) > 0.94 and
+                eye_band_metrics.get("dark_ratio", 1.0) < 0.12
+            )
+            metrics['visual_eye_closed'] = bool(visual_eye_closed)
+            if visual_eye_closed:
+                return 0.0, f"眼睛閉合 (VisualEAR: {current_ear:.4f})", metrics
 
         if deferred_quality_rejects:
             deferred_quality_rejects.sort(key=lambda item: item[0], reverse=True)
@@ -2112,6 +2143,36 @@ class Comparison:
                             face_blur_metrics.get('laplacian', 999) < 30 and
                             face_blur_metrics.get('tenengrad', 99999) < 900
                         )
+                        feature_low_texture_quality_risk = (
+                            face_blur_metrics.get('feature_low_texture_quality_risk', False) or
+                            face_blur_metrics.get('wet_lens_low_texture_quality_risk', False)
+                        )
+                        face_occlusion_metrics = quality_metrics.get('face_occlusion', {})
+                        eye_metrics = quality_metrics.get('eye_occlusion', {})
+                        eye_band_metrics = eye_metrics.get('eye_band', {}) if isinstance(eye_metrics, dict) else {}
+                        mouth_metrics = face_occlusion_metrics.get('mouth_region', {}) if isinstance(face_occlusion_metrics, dict) else {}
+                        lower_box_metrics = face_occlusion_metrics.get('lower_box_region', {}) if isinstance(face_occlusion_metrics, dict) else {}
+                        face_region_metrics = face_occlusion_metrics.get('face_region', {}) if isinstance(face_occlusion_metrics, dict) else {}
+                        regional_low_texture_quality_risk = (
+                            face_width >= 430 and
+                            (
+                                (
+                                    eye_band_metrics.get('skin_ratio', 0.0) > 0.98 and
+                                    eye_band_metrics.get('laplacian', 999.0) < 18.0 and
+                                    eye_band_metrics.get('edge_density', 1.0) < 0.020 and
+                                    mouth_metrics.get('laplacian', 999.0) < 20.0
+                                ) or (
+                                    eye_band_metrics.get('skin_ratio', 0.0) > 0.90 and
+                                    eye_band_metrics.get('dark_ratio', 1.0) < 0.16 and
+                                    mouth_metrics.get('laplacian', 999.0) < 10.0 and
+                                    lower_box_metrics.get('laplacian', 999.0) < 25.0 and
+                                    face_blur_metrics.get('laplacian', 999.0) < 35.0
+                                ) or (
+                                    lower_box_metrics.get('dark_ratio', 0.0) > 0.50 and
+                                    face_region_metrics.get('dark_ratio', 0.0) > 0.30
+                                )
+                            )
+                        )
                         mid_texture_ambiguous = (
                             400 <= face_width < 430 and
                             20 <= face_blur_metrics.get('laplacian', 999) < 30 and
@@ -2128,9 +2189,10 @@ class Comparison:
                             gap < 0.02 and
                             z_score < 1.8
                         )
-                        low_texture_ambiguous = low_texture_face and (
-                            (gap < 0.05 and z_score < 1.8) or
-                            (face_width > 500 and confidence < 0.80 and gap < 0.08)
+                        low_texture_ambiguous = (low_texture_face or feature_low_texture_quality_risk or regional_low_texture_quality_risk) and (
+                            (gap < 0.05 and z_score < 2.0) or
+                            (430 <= face_width < 500 and confidence < 0.75 and gap < 0.08 and z_score < 2.0) or
+                            (face_width > 500 and confidence < 0.80 and gap < 0.08 and z_score < 1.8)
                         )
                         eye_closed_ambiguous = (
                             quality_metrics.get('ear', 1.0) < 0.15 and
@@ -2141,7 +2203,7 @@ class Comparison:
                         top_edge_ambiguous = (
                             face_width >= 500 and
                             quality_metrics.get('face_top_px', 999.0) < 20.0 and
-                            confidence >= 0.78 and
+                            confidence >= 0.77 and
                             gap < 0.05
                         )
                         motion_blur_weak_separation = (
@@ -2195,7 +2257,11 @@ class Comparison:
                         ):
                             gap_threshold = max(
                                 gap_threshold,
-                                0.08 if face_width > 500 or side_face_ambiguous else 0.05,
+                                0.08 if (
+                                    face_width > 500 or
+                                    side_face_ambiguous or
+                                    (low_texture_ambiguous and confidence < 0.75 and z_score < 2.0)
+                                ) else 0.05,
                                 0.06 if eye_closed_ambiguous else 0.0,
                                 0.05 if top_edge_ambiguous else 0.0,
                                 0.06 if motion_blur_weak_separation else 0.0)
@@ -2211,8 +2277,19 @@ class Comparison:
                                 top_edge_ambiguous)
                             quality_metrics['motion_blur_weak_separation'] = bool(
                                 motion_blur_weak_separation)
+                            quality_metrics['feature_low_texture_quality_risk'] = bool(
+                                feature_low_texture_quality_risk)
+                            quality_metrics['regional_low_texture_quality_risk'] = bool(
+                                regional_low_texture_quality_risk)
 
-                        if not top2_same_id and gap < gap_threshold:
+                        same_id_gap_allowed = top2_same_id and not (
+                            low_texture_ambiguous or
+                            mid_texture_ambiguous or
+                            eye_closed_ambiguous or
+                            top_edge_ambiguous or
+                            motion_blur_weak_separation
+                        )
+                        if not same_id_gap_allowed and gap < gap_threshold:
                             LOGGER.info(
                                 f"[{camera_name}][Gap過濾] 分數過於接近 (Gap: {gap:.4f} < {gap_threshold}) - 拒絕辨識")
                             if eye_closed_ambiguous:
@@ -2223,6 +2300,8 @@ class Comparison:
                                 quality_metrics['quality_reject_reason'] = "quality_影像模糊_(MotionBlurWeakSeparation)"
                             elif mid_texture_ambiguous:
                                 quality_metrics['quality_reject_reason'] = "quality_影像模糊_(BlurFace)"
+                            elif low_texture_ambiguous:
+                                quality_metrics['quality_reject_reason'] = "quality_影像模糊_(LowTextureWeakSeparation)"
                             elif side_face_ambiguous:
                                 quality_metrics['quality_reject_reason'] = "quality_未正視鏡頭_(SideFaceAmbiguous)"
 
