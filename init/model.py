@@ -1088,7 +1088,14 @@ class Comparison:
 
     @staticmethod
     def _is_backlight_quality_msg(msg):
-        return "背後光源" in msg or "BacklightGlare" in msg or "光源散射" in msg
+        return (
+            "背後光源" in msg or
+            "BacklightGlare" in msg or
+            "光源散射" in msg or
+            "光線影響" in msg or
+            "FaceLightInterference" in msg or
+            "光線直射" in msg
+        )
 
     def _quality_hint_payload(self, quality_msg, quality_metrics=None):
         face_detail = None
@@ -1119,10 +1126,14 @@ class Comparison:
             return "無法識別", "無法識別", "hint_unrecognized"
         if "斜視" in quality_msg or "未正視" in quality_msg or "側臉" in quality_msg:
             return "請正視鏡頭", "請正視鏡頭", "hint_look_straight"
-        if "光線直射" in quality_msg:
-            return "光線直射 請遮擋", "光線直射請遮擋", "hint_sunset"
-        if "背後光源" in quality_msg or "BacklightGlare" in quality_msg:
-            return "請遮擋背後光源", "請遮擋背後光源", "hint_backlight"
+        if (
+            "光線直射" in quality_msg or
+            "背後光源" in quality_msg or
+            "BacklightGlare" in quality_msg or
+            "光線影響" in quality_msg or
+            "FaceLightInterference" in quality_msg
+        ):
+            return "無法識別", "無法識別", "hint_unrecognized"
         return "請對準鏡頭", "請對準鏡頭", "hint_occlusion"
 
     def _show_unrecognized_hint(
@@ -1400,6 +1411,7 @@ class Comparison:
         from init.function import is_sunset_condition
 
         frame_to_use = None
+        backlight_reject_msg = ""
         # 由於此檢查需要 crop ROI，為了效能，只在人臉足夠大時執行
         if face_w > 100:
             frame_to_use = self.system.state.frame_mtcnn[self.frame_num]
@@ -1429,8 +1441,7 @@ class Comparison:
                 backlight_metrics = analyze_backlight_glare(frame_to_use, box)
                 metrics['backlight_glare'] = backlight_metrics
                 if backlight_metrics.get("is_backlight_glare", False):
-                    # [2026-06-09 Fix] Defer to allow FaceOcclusion (like hand covering eyes) to take precedence
-                    deferred_quality_rejects.append((80, "背後光源散射 (BacklightGlare)"))
+                    backlight_reject_msg = "光線影響 (FaceLightInterference)"
 
         # ---------------------------------------------------------
         # 3. 3D 姿態與視線檢查 (Gaze & Pose Check) - 核心邏輯
@@ -1702,6 +1713,39 @@ class Comparison:
                 return 0.0, face_occlusion_detail["quality_msg"], metrics
             eye_band_metrics = metrics.get('eye_occlusion', {}).get(
                 "eye_band", {})
+            left_eye_metrics = metrics.get('eye_occlusion', {}).get(
+                "left_eye", {})
+            right_eye_metrics = metrics.get('eye_occlusion', {}).get(
+                "right_eye", {})
+            visual_eye_skin_occlusion = (
+                current_ear < 0.155 and
+                430 <= face_w < 500 and
+                abs(metrics.get('pitch', 0.0)) < 10.0 and
+                abs(metrics.get('yaw', 0.0)) < 12.0 and
+                abs(metrics.get('roll_angle', 0.0)) < 6.0 and
+                eye_band_metrics.get("skin_ratio", 0.0) > 0.93 and
+                eye_band_metrics.get("edge_density", 0.0) > 0.050 and
+                max(left_eye_metrics.get("bright_ratio", 1.0),
+                    right_eye_metrics.get("bright_ratio", 1.0)) < 0.012 and
+                face_occlusion_metrics.get("near_face_skin_side_adjacent", False) and
+                face_occlusion_metrics.get("near_face_skin_component_ratio", 0.0) > 0.25
+            )
+            if visual_eye_skin_occlusion:
+                metrics['visual_eye_skin_occlusion'] = True
+                return 0.0, "眼部遮擋 (EyeOcclusionBoth)", metrics
+            front_face_hand_occlusion = (
+                -20.0 < metrics.get('pitch', 0.0) < -15.0 and
+                abs(metrics.get('yaw', 0.0)) < 12.0 and
+                0.42 < metrics.get('v_ratio', 1.0) < 0.56 and
+                430 <= face_w < 520 and
+                face_occlusion_metrics.get("near_face_skin_component_ratio", 0.0) > 0.34 and
+                face_occlusion_metrics.get("near_face_skin_vertical_overlap_ratio", 0.0) > 0.85 and
+                abs(left_eye_metrics.get("mean_y", 0.0) -
+                    right_eye_metrics.get("mean_y", 0.0)) > 30.0
+            )
+            if front_face_hand_occlusion:
+                metrics['front_face_hand_occlusion'] = True
+                return 0.0, "臉部遮擋 (FaceOcclusion)", metrics
             visual_eye_closed = (
                 current_ear < 0.145 and
                 face_w >= 430 and
@@ -1712,6 +1756,11 @@ class Comparison:
             metrics['visual_eye_closed'] = bool(visual_eye_closed)
             if visual_eye_closed:
                 return 0.0, f"眼睛閉合 (VisualEAR: {current_ear:.4f})", metrics
+
+        if backlight_reject_msg:
+            # Face light interference is secondary; pose/occlusion/blur should
+            # explain common false positives first.
+            deferred_quality_rejects.append((40, backlight_reject_msg))
 
         if deferred_quality_rejects:
             deferred_quality_rejects.sort(key=lambda item: item[0], reverse=True)
@@ -1998,7 +2047,7 @@ class Comparison:
                         snapshot = _frame
                         if snapshot is not None:
                             save_reason = (
-                                "BacklightGlare_背後光源過強"
+                                "FaceLightInterference_光線影響"
                                 if is_backlight_quality else quality_msg
                             )
                             saved_path = self._save_potential_miss_image(

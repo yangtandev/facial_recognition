@@ -2022,6 +2022,7 @@ def analyze_face_occlusion(frame, mesh_points=None, points=None, box=None, gaze_
             eye_metrics.get("reason") == "shadowed_skin_visible" and
             generic_lower_resolution_ok and
             not severe_face_underexposed and
+            abs(gaze["pitch"]) <= 15.0 and
             lower_box_stats["valid"] and
             eye_band_stats.get("skin_ratio", 0.0) > 0.86 and
             0.12 < eye_band_stats.get("dark_ratio", 0.0) < 0.24 and
@@ -2038,14 +2039,53 @@ def analyze_face_occlusion(frame, mesh_points=None, points=None, box=None, gaze_
             lower_box_skin < 0.82 and
             mouth_mean < face_mean - 3.0
         )
+        skin_like_eye_feature_cover = (
+            isinstance(eye_metrics, dict) and
+            not eye_metrics.get("eye_occluded", False) and
+            generic_lower_resolution_ok and
+            not severe_face_underexposed and
+            abs(gaze["pitch"]) <= 15.0 and
+            abs(gaze["yaw"]) <= 15.0 and
+            abs(gaze["roll"]) <= 15.0 and
+            face_skin > 0.86 and
+            eye_band_stats.get("skin_ratio", 0.0) > 0.90 and
+            left_eye_stats.get("skin_ratio", 0.0) > 0.86 and
+            right_eye_stats.get("skin_ratio", 0.0) > 0.94 and
+            max(left_eye_stats.get("bright_ratio", 1.0),
+                right_eye_stats.get("bright_ratio", 1.0)) < 0.035 and
+            max(left_eye_stats.get("specular_ratio", 1.0),
+                right_eye_stats.get("specular_ratio", 1.0)) < 0.006 and
+            (
+                abs(left_eye_stats.get("mean_y", 0.0) -
+                    right_eye_stats.get("mean_y", 0.0)) > 28.0 or
+                (
+                    left_eye_stats.get("skin_ratio", 0.0) > 0.93 and
+                    right_eye_stats.get("skin_ratio", 0.0) > 0.93 and
+                    eye_band_stats.get("edge_density", 0.0) > 0.040 and
+                    max(left_eye_stats.get("laplacian", 999.0),
+                        right_eye_stats.get("laplacian", 999.0)) < 62.0
+                )
+            ) and
+            mouth_stats["laplacian"] < 36.0 and
+            mouth_mean < face_mean - 8.0
+        )
 
-        if broad_eye_skin_hand_cover:
+        if broad_eye_skin_hand_cover or skin_like_eye_feature_cover:
             eye_metrics["eye_occluded"] = True
-            eye_metrics["reason"] = "both_eye_skin_hand_cover"
-            eye_metrics["occluded_eye_side"] = "both"
+            if skin_like_eye_feature_cover and abs(left_eye_stats.get("mean_y", 0.0) -
+                                                  right_eye_stats.get("mean_y", 0.0)) > 28.0:
+                eye_metrics["reason"] = "single_eye_skin_hand_cover"
+                eye_metrics["occluded_eye_side"] = (
+                    left_eye_stats.get("mean_y", 0.0) < right_eye_stats.get("mean_y", 0.0)
+                    and (eye_metrics.get("left_eye_subject_side") or "left")
+                    or (eye_metrics.get("right_eye_subject_side") or "right")
+                )
+            else:
+                eye_metrics["reason"] = "both_eye_skin_hand_cover"
+                eye_metrics["occluded_eye_side"] = "both"
             result["eye_occlusion"] = eye_metrics
             result["face_occluded"] = True
-            result["reason"] = "both_eye_skin_hand_cover"
+            result["reason"] = eye_metrics["reason"]
             return result
 
         lower_face_occluded = (
@@ -2508,8 +2548,9 @@ def enhance_low_light_frame(frame, gamma=0.72, clahe_clip=1.6, clahe_grid=(8, 8)
 
 def analyze_backlight_glare(frame, box):
     """
-    Detect backlight/halo glare that washes out face detail or places a bright
-    source behind a dark face. Tuned conservatively for face-recognition rejects.
+    Detect light interference on the face itself. External light sources around
+    the face are intentionally ignored; only face-region washout, flare streaks,
+    and local overexposure that damages facial details should reject.
     """
     try:
         h, w = frame.shape[:2]
@@ -2524,83 +2565,31 @@ def analyze_backlight_glare(frame, box):
         if face_y.size == 0:
             return {"is_backlight_glare": False}
 
-        bg_x1 = max(0, x1 - int(fw * 0.8))
-        bg_x2 = min(w, x2 + int(fw * 0.8))
-        bg_y1 = max(0, y1 - int(fh * 1.2))
-        bg_y2 = min(h, y1 + int(fh * 0.2))
-        bg_y = y_channel[bg_y1:bg_y2, bg_x1:bg_x2]
-
         face_mean = float(np.mean(face_y))
-        bg_mean = float(np.mean(bg_y)) if bg_y.size else 0.0
-        bg_bright_ratio = float(np.mean(bg_y > 210)) if bg_y.size else 0.0
-        bg_very_bright_ratio = float(np.mean(bg_y > 235)) if bg_y.size else 0.0
-        bg_hot_ratio = float(np.mean(bg_y > 245)) if bg_y.size else 0.0
-        contrast = bg_mean - face_mean
-
-        if bg_y.size:
-            bg_hot_mask = (bg_y > 245).astype(np.uint8)
-            num, _, stats, _ = cv2.connectedComponentsWithStats(
-                bg_hot_mask, 8)
-            largest_bg_hot = (
-                int(stats[1:, cv2.CC_STAT_AREA].max()) if num > 1 else 0)
-            bg_hot_component_ratio = float(largest_bg_hot / max(1, bg_y.size))
-        else:
-            bg_hot_component_ratio = 0.0
+        face_std = float(np.std(face_y))
+        face_p50 = float(np.percentile(face_y, 50))
+        face_p95 = float(np.percentile(face_y, 95))
+        face_p99 = float(np.percentile(face_y, 99))
 
         face_bgr = frame[fy1:fy2, fx1:fx2]
         face_gray = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2GRAY)
         face_lap = float(cv2.Laplacian(face_gray, cv2.CV_64F).var())
 
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        near_x1 = max(0, x1 - int(fw * 0.90))
-        near_x2 = min(w, x2 + int(fw * 0.90))
-        near_y1 = max(0, y1 - int(fh * 0.35))
-        near_y2 = min(h, y2 + int(fh * 0.45))
-        near_y = y_channel[near_y1:near_y2, near_x1:near_x2]
-        near_hot_ratio = 0.0
-        near_hot_component_ratio = 0.0
-        near_hot_distance_ratio = 999.0
-        if near_y.size:
-            near_mask = np.ones(near_y.shape, dtype=np.uint8)
-            nfx1 = max(0, fx1 - near_x1)
-            nfx2 = min(near_x2 - near_x1, fx2 - near_x1)
-            nfy1 = max(0, fy1 - near_y1)
-            nfy2 = min(near_y2 - near_y1, fy2 - near_y1)
-            if nfx2 > nfx1 and nfy2 > nfy1:
-                near_mask[nfy1:nfy2, nfx1:nfx2] = 0
-            near_valid = near_mask.astype(bool)
-            near_hot = ((near_y > 245) & near_valid).astype(np.uint8)
-            valid_count = max(1, int(np.count_nonzero(near_valid)))
-            near_hot_ratio = float(np.count_nonzero(near_hot) / valid_count)
-            num, _, stats, _ = cv2.connectedComponentsWithStats(near_hot, 8)
-            largest_area = 0
-            nearest_distance = float(max(w, h))
-            for label_idx in range(1, num):
-                area = int(stats[label_idx, cv2.CC_STAT_AREA])
-                bx = int(stats[label_idx, cv2.CC_STAT_LEFT])
-                by = int(stats[label_idx, cv2.CC_STAT_TOP])
-                bw = int(stats[label_idx, cv2.CC_STAT_WIDTH])
-                bh = int(stats[label_idx, cv2.CC_STAT_HEIGHT])
-                ox1, oy1 = near_x1 + bx, near_y1 + by
-                ox2, oy2 = ox1 + bw, oy1 + bh
-                dx = max(x1 - ox2, ox1 - x2, 0)
-                dy = max(y1 - oy2, oy1 - y2, 0)
-                dist = float((dx * dx + dy * dy) ** 0.5)
-                if area > largest_area:
-                    largest_area = area
-                    nearest_distance = dist
-            near_hot_component_ratio = float(largest_area / max(1, fw * fh))
-            near_hot_distance_ratio = float(nearest_distance / max(1, fw))
-
-        face_hsv = hsv[fy1:fy2, fx1:fx2]
+        face_hsv = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2HSV)
         upper_y1 = int(fh * 0.12)
         upper_y2 = max(upper_y1 + 1, int(fh * 0.62))
         upper_y = face_y[upper_y1:upper_y2, :]
         upper_s = face_hsv[upper_y1:upper_y2, :, 1]
         upper_h = face_hsv[upper_y1:upper_y2, :, 0]
+        upper_gray = face_gray[upper_y1:upper_y2, :]
+        upper_lap = (
+            float(cv2.Laplacian(upper_gray, cv2.CV_64F).var())
+            if upper_gray.size else 0.0
+        )
         face_flare_streak_ratio = 0.0
         face_flare_component_ratio = 0.0
         face_flare_span_ratio = 0.0
+        face_flare_height_ratio = 0.0
         if upper_y.size:
             flare_mask = (
                 ((upper_y > 170) & (upper_s < 95)) |
@@ -2612,212 +2601,90 @@ def analyze_backlight_glare(frame, box):
                 flare_mask, 8)
             largest_area = 0
             largest_width = 0
+            largest_height = 0
             for label_idx in range(1, num):
                 area = int(stats[label_idx, cv2.CC_STAT_AREA])
                 comp_width = int(stats[label_idx, cv2.CC_STAT_WIDTH])
+                comp_height = int(stats[label_idx, cv2.CC_STAT_HEIGHT])
                 if area > largest_area:
                     largest_area = area
                     largest_width = comp_width
+                    largest_height = comp_height
             face_flare_component_ratio = float(
                 largest_area / max(1, upper_y.size))
             face_flare_span_ratio = float(largest_width / max(1, fw))
+            face_flare_height_ratio = float(largest_height / max(1, upper_y.shape[0]))
 
-        side_x1 = max(0, x1 - int(fw * 0.95))
-        side_x2 = min(w, x2 + int(fw * 0.95))
-        side_y1 = max(0, y1 - int(fh * 0.20))
-        side_y2 = min(h, y2 + int(fh * 0.90))
-        side_y = y_channel[side_y1:side_y2, side_x1:side_x2]
-        side_s = hsv[side_y1:side_y2, side_x1:side_x2, 1]
-        side_mask = np.ones(side_y.shape, dtype=np.uint8)
-        mask_x1 = max(0, fx1 - side_x1)
-        mask_x2 = min(side_x2 - side_x1, fx2 - side_x1)
-        mask_y1 = max(0, fy1 - side_y1)
-        mask_y2 = min(side_y2 - side_y1, fy2 - side_y1)
-        if mask_x2 > mask_x1 and mask_y2 > mask_y1:
-            side_mask[mask_y1:mask_y2, mask_x1:mask_x2] = 0
-        valid_side = side_mask.astype(bool)
-        if side_y.size and np.any(valid_side):
-            side_vals = side_y[valid_side]
-            side_sat = side_s[valid_side]
-            side_hue = hsv[side_y1:side_y2, side_x1:side_x2, 0][valid_side]
-            side_hot_ratio = float(np.mean(side_vals > 245))
-            side_very_bright_ratio = float(np.mean(side_vals > 235))
-            side_saturated_bright_ratio = float(
-                np.mean((side_vals > 210) & (side_sat > 55)))
-            cyan_bright = (
-                (side_vals > 175) &
-                (side_sat > 35) &
-                (side_hue >= 75) &
-                (side_hue <= 115)
-            )
-            cyan_core = (
-                (side_vals > 210) &
-                (side_sat > 45) &
-                (side_hue >= 75) &
-                (side_hue <= 115)
-            )
-            side_cyan_bright_ratio = float(np.mean(cyan_bright))
-            side_cyan_core_ratio = float(np.mean(cyan_core))
-            cyan_core_mask = np.zeros(side_y.shape, dtype=np.uint8)
-            cyan_core_mask[valid_side] = cyan_core.astype(np.uint8)
-            num, _, stats, _ = cv2.connectedComponentsWithStats(
-                cyan_core_mask, 8)
-            largest_cyan_core = (
-                int(stats[1:, cv2.CC_STAT_AREA].max()) if num > 1 else 0)
-            side_cyan_core_component_ratio = float(
-                largest_cyan_core / max(1, np.count_nonzero(valid_side)))
-        else:
-            side_hot_ratio = 0.0
-            side_very_bright_ratio = 0.0
-            side_saturated_bright_ratio = 0.0
-            side_cyan_bright_ratio = 0.0
-            side_cyan_core_ratio = 0.0
-            side_cyan_core_component_ratio = 0.0
+        hot_mask = ((face_y > 235) & (face_hsv[:, :, 1] < 120)).astype(np.uint8)
+        hot_ratio = float(np.mean(hot_mask)) if hot_mask.size else 0.0
+        num, _, stats, _ = cv2.connectedComponentsWithStats(hot_mask, 8)
+        largest_hot = int(stats[1:, cv2.CC_STAT_AREA].max()) if num > 1 else 0
+        hot_component_ratio = float(largest_hot / max(1, face_y.size))
 
-        dark_face_bright_bg = (
-            (
-                face_mean < 60 and
-                contrast > 80 and
-                bg_very_bright_ratio > 0.095 and
-                face_lap < 80
-            ) or
-            (
-                face_mean < 70 and
-                contrast > 75 and
-                bg_very_bright_ratio > 0.085 and
-                bg_bright_ratio > 0.12 and
-                face_lap < 25
-            )
-        )
-        washed_source_evidence = (
-            bg_very_bright_ratio > 0.001 or
-            bg_hot_component_ratio > 0.001 or
-            side_cyan_bright_ratio > 0.003 or
-            side_very_bright_ratio > 0.0015
-        )
-        face_washed_affected = (
-            fw >= 450 and
-            face_mean > 145 and
-            20 <= face_lap < 60 and
-            washed_source_evidence
-        )
-        face_shadow_affected = (
-            (
-                contrast > 65 and
-                face_mean < 115 and
-                face_lap < 45
-            ) or
-            (
-                contrast > 80 and
-                face_mean < 125 and
-                face_lap < 70 and
-                bg_very_bright_ratio > 0.05
-            ) or
-            (
-                face_mean < 75 and
-                contrast > 45 and
-                face_lap < 90
-            )
-        )
-        washed_face_glare = face_washed_affected
-        overhead_source_glare = (
-            fw >= 280 and
-            bg_very_bright_ratio > 0.10 and
-            bg_bright_ratio > 0.18 and
-            (bg_hot_ratio > 0.12 or bg_hot_component_ratio > 0.08) and
-            bg_mean > 165 and
-            contrast > 65 and
-            face_mean < 80 and
-            face_lap < 30
-        )
-        side_source_core = (
-            side_hot_ratio > 0.012 or
-            side_very_bright_ratio > 0.025 or
-            side_saturated_bright_ratio > 0.035
-        )
-        side_source_present = (
-            side_source_core and
-            (
-                (
-                    side_cyan_bright_ratio > 0.025 and
-                    side_cyan_core_ratio > 0.005 and
-                    side_cyan_core_component_ratio > 0.002
-                ) or
-                (
-                    side_cyan_bright_ratio > 0.035 and
-                    side_cyan_core_ratio > 0.002 and
-                    side_cyan_core_component_ratio > 0.001
-                )
-            )
-        )
-        side_source_glare = (
-            fw >= 280 and
-            side_source_present and
-            face_shadow_affected
-        )
-        side_source_clear_face_suppressed = side_source_present and not face_shadow_affected
-        face_halo_glare = (
-            fw >= 280 and
-            side_source_present and
-            face_shadow_affected and
-            100 <= face_mean <= 130 and
-            face_lap < 45 and
-            contrast > 35
-        )
-        near_face_source_present = (
-            fw >= 430 and
-            near_hot_component_ratio > 0.003 and
-            near_hot_distance_ratio < 0.08
-        )
         face_flare_affected = (
+            fw >= 430 and
+            face_mean < 140 and
+            face_std < 35 and
+            face_lap < 120 and
+            upper_lap < 50 and
             face_flare_streak_ratio > 0.025 and
             face_flare_component_ratio > 0.010 and
             face_flare_span_ratio > 0.15
         )
-        near_face_source_glare = (
-            near_face_source_present and
-            face_flare_affected
+        hot_patch_detail_loss = (
+            fw >= 300 and
+            face_std < 40 and
+            face_lap < 65 and
+            upper_lap < 45 and
+            hot_ratio > 0.050 and
+            hot_component_ratio > 0.025
+        )
+        washed_face_glare = (
+            fw >= 430 and
+            20 <= face_lap < 70 and
+            face_mean > 150 and
+            face_std < 45 and
+            face_flare_streak_ratio > 0.035
+        )
+        split_light_shadow_damage = (
+            fw >= 430 and
+            face_std < 35 and
+            face_lap < 95 and
+            face_p95 - face_p50 > 55 and
+            face_p99 > 205 and
+            face_flare_component_ratio > 0.008 and
+            face_flare_span_ratio > 0.12
+        )
+        face_light_interference = bool(
+            face_flare_affected or
+            hot_patch_detail_loss or
+            washed_face_glare or
+            split_light_shadow_damage
         )
 
         return {
-            "is_backlight_glare": bool(dark_face_bright_bg or washed_face_glare or overhead_source_glare or side_source_glare or face_halo_glare or near_face_source_glare),
+            "is_backlight_glare": face_light_interference,
+            "is_face_light_interference": face_light_interference,
             "face_mean_y": face_mean,
-            "background_mean_y": bg_mean,
-            "background_bright_ratio": bg_bright_ratio,
-            "background_very_bright_ratio": bg_very_bright_ratio,
-            "background_hot_ratio": bg_hot_ratio,
-            "background_hot_component_ratio": bg_hot_component_ratio,
-            "background_face_contrast": float(contrast),
+            "face_std_y": face_std,
+            "face_p50_y": face_p50,
+            "face_p95_y": face_p95,
+            "face_p99_y": face_p99,
             "face_laplacian": face_lap,
-            "side_hot_ratio": side_hot_ratio,
-            "side_very_bright_ratio": side_very_bright_ratio,
-            "side_saturated_bright_ratio": side_saturated_bright_ratio,
-            "side_cyan_bright_ratio": side_cyan_bright_ratio,
-            "side_cyan_core_ratio": side_cyan_core_ratio,
-            "side_cyan_core_component_ratio": side_cyan_core_component_ratio,
-            "side_source_core": bool(side_source_core),
-            "side_source_present": bool(side_source_present),
-            "washed_source_evidence": bool(washed_source_evidence),
-            "face_shadow_affected": bool(face_shadow_affected),
-            "face_washed_affected": bool(face_washed_affected),
-            "dark_face_bright_bg": bool(dark_face_bright_bg),
+            "upper_laplacian": upper_lap,
             "washed_face_glare": bool(washed_face_glare),
-            "overhead_source_glare": bool(overhead_source_glare),
-            "side_source_glare": bool(side_source_glare),
-            "side_source_clear_face_suppressed": bool(side_source_clear_face_suppressed),
-            "face_halo_glare": bool(face_halo_glare),
-            "near_hot_ratio": near_hot_ratio,
-            "near_hot_component_ratio": near_hot_component_ratio,
-            "near_hot_distance_ratio": near_hot_distance_ratio,
-            "near_face_source_present": bool(near_face_source_present),
             "face_flare_streak_ratio": face_flare_streak_ratio,
             "face_flare_component_ratio": face_flare_component_ratio,
             "face_flare_span_ratio": face_flare_span_ratio,
+            "face_flare_height_ratio": face_flare_height_ratio,
             "face_flare_affected": bool(face_flare_affected),
-            "near_face_source_glare": bool(near_face_source_glare),
+            "hot_ratio": hot_ratio,
+            "hot_component_ratio": hot_component_ratio,
+            "hot_patch_detail_loss": bool(hot_patch_detail_loss),
+            "split_light_shadow_damage": bool(split_light_shadow_damage),
         }
     except Exception as e:
-        LOGGER.error(f"Backlight glare analysis failed: {e}")
+        LOGGER.error(f"Face light interference analysis failed: {e}")
         return {"is_backlight_glare": False}
 
 
@@ -2941,6 +2808,37 @@ def analyze_face_blur(frame, box, pose=None):
             lap < 30 and
             tenengrad < 450
         )
+        medium_dark_soft_blur = (
+            430 <= face_w < 490 and
+            lap < 16 and
+            tenengrad < 900 and
+            bright_ratio < 0.18 and
+            very_bright_ratio < 0.08
+        )
+        large_motion_smear_blur = (
+            490 <= face_w < 540 and
+            60 <= lap < 85 and
+            tenengrad < 2300 and
+            pose_yaw > 12.0 and
+            bright_ratio > 0.04 and
+            bright_ratio < 0.10 and
+            very_bright_ratio < 0.06
+        )
+        large_low_detail_blur = (
+            face_w >= 540 and
+            25 <= lap < 35 and
+            1100 < tenengrad < 1800 and
+            bright_ratio < 0.10 and
+            very_bright_ratio < 0.06
+        )
+        large_soft_motion_blur = (
+            490 <= face_w < 540 and
+            pose_yaw < 18.0 and
+            45 <= lap < 70 and
+            tenengrad < 1900 and
+            bright_ratio < 0.12 and
+            very_bright_ratio < 0.07
+        )
         large_frontal_low_texture_blur = (
             490 <= face_w < 540 and
             pose_yaw < 18.0 and
@@ -3031,7 +2929,7 @@ def analyze_face_blur(frame, box, pose=None):
         )
 
         return {
-            "is_blur": bool(severe_low_texture_blur or mid_low_texture_blur or low_light_small_face_blur or low_light_tiny_face_blur or bright_tiny_face_low_texture_blur or bright_small_face_low_texture_blur or frontal_bright_low_texture_blur or bright_low_texture_blur or visible_low_texture_blur or medium_face_low_texture_blur or glare_smear_blur or blur_small_face_glare or side_motion_blur or large_frontal_low_texture_blur or huge_face_low_texture_blur or dark_low_texture_blur or rain_droplet_blur),
+            "is_blur": bool(severe_low_texture_blur or mid_low_texture_blur or low_light_small_face_blur or low_light_tiny_face_blur or bright_tiny_face_low_texture_blur or bright_small_face_low_texture_blur or frontal_bright_low_texture_blur or bright_low_texture_blur or visible_low_texture_blur or medium_face_low_texture_blur or glare_smear_blur or blur_small_face_glare or side_motion_blur or medium_dark_soft_blur or large_motion_smear_blur or large_low_detail_blur or large_soft_motion_blur or large_frontal_low_texture_blur or huge_face_low_texture_blur or dark_low_texture_blur or rain_droplet_blur),
             "laplacian": lap,
             "tenengrad": tenengrad,
             "pose_yaw_abs": pose_yaw,
@@ -3051,6 +2949,10 @@ def analyze_face_blur(frame, box, pose=None):
             "glare_smear_blur": bool(glare_smear_blur),
             "blur_small_face_glare": bool(blur_small_face_glare),
             "side_motion_blur": bool(side_motion_blur),
+            "medium_dark_soft_blur": bool(medium_dark_soft_blur),
+            "large_motion_smear_blur": bool(large_motion_smear_blur),
+            "large_low_detail_blur": bool(large_low_detail_blur),
+            "large_soft_motion_blur": bool(large_soft_motion_blur),
             "large_frontal_low_texture_blur": bool(large_frontal_low_texture_blur),
             "huge_face_low_texture_blur": bool(huge_face_low_texture_blur),
             "rain_droplet_blur": bool(rain_droplet_blur),
