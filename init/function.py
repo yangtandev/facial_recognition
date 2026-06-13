@@ -1672,6 +1672,22 @@ def analyze_face_occlusion(frame, mesh_points=None, points=None, box=None, gaze_
                         skin_component["vertical_overlap_ratio"] > 0.45 and
                         skin_component["height_ratio"] > 0.75
                     )
+                    side_palm_eye_face_foreground = (
+                        (skin_component["side_adjacent"] or
+                         near_face_foreground_distance_ratio <= 0.02) and
+                        face_box_w >= 430.0 and
+                        abs(gaze["pitch"]) <= 13.0 and
+                        abs(gaze["yaw"]) <= 12.0 and
+                        abs(gaze["roll"]) <= 10.0 and
+                        0.30 <= near_face_skin_component_ratio <= 0.45 and
+                        skin_component["vertical_overlap_ratio"] > 0.88 and
+                        skin_component["height_ratio"] > 0.78 and
+                        face_stats["skin_ratio"] > 0.72 and
+                        local_v_ratio > 0.65 and
+                        eye_metrics.get("eye_band", {}).get("skin_ratio", 1.0) < 0.90 and
+                        mouth_skin < 0.90 and
+                        mouth_stats["dark_ratio"] > 0.18
+                    )
                     center_hand_foreground = (
                         near_face_skin_component_ratio > 1.35 and
                         skin_component["vertical_overlap_ratio"] > 0.85 and
@@ -1684,11 +1700,14 @@ def analyze_face_occlusion(frame, mesh_points=None, points=None, box=None, gaze_
                     near_face_foreground_occlusion = (
                         side_dark_object or
                         side_hand_foreground or
+                        side_palm_eye_face_foreground or
                         center_hand_foreground
                     )
                     result["near_face_side_dark_object"] = bool(side_dark_object)
                     result["near_face_side_hand_foreground"] = bool(
                         side_hand_foreground)
+                    result["near_face_side_palm_eye_face_foreground"] = bool(
+                        side_palm_eye_face_foreground)
                     result["near_face_center_hand_foreground"] = bool(
                         center_hand_foreground)
                     result["near_face_skin_side_adjacent"] = bool(

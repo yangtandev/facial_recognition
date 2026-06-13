@@ -267,6 +267,14 @@ class Say_:
         with self.process_lock:
             return self.current_process is not None and self.current_process.poll() is None
 
+    def is_token_active(self, token):
+        if not token:
+            return False
+        with self.status_lock:
+            start_time = self.last_start_time.get(token, 0.0)
+            end_time = self.last_end_time.get(token, 0.0)
+        return start_time > end_time
+
     def reset(self):
         """[2026-01-30 Fix] Reset speaker state on configuration reload."""
         self._kill_current_process()

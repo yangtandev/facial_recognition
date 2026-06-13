@@ -927,12 +927,19 @@ class Comparison:
         self.stop_threads = False
 
         # 用於控制辨識成功後，人員名稱在畫面上停留的時間
-        self.display_state = {'person_id': 'None', 'last_update': 0}
+        self.display_state = {
+            'person_id': 'None',
+            'last_update': 0,
+            'voice_token': None,
+            'min_hold_until': 0.0,
+            'max_hold_until': 0.0,
+        }
         self.last_recognition_time = 0
 
         self.last_api_trigger_time = {}  # 記錄每個人員上次觸發API/語音的時間，用於防止短時間重複播報
 
         self.DISPLAY_STATE_HOLD_SECONDS = 2  # 辨識成功後，名稱顯示的持續時間
+        self.DISPLAY_STATE_MAX_HOLD_SECONDS = 6.0
         self.CONFIDENCE_THRESHOLD = 0.72     # 可靠辨識的信賴度門檻 (員工)
         self.VISITOR_CONF_THRESHOLD = 0.5    # 訪客辨識的信賴度門檻 (低於此值為訪客)
         self.GRAY_ZONE_CONF_LOW = 0.70
@@ -1694,6 +1701,18 @@ class Comparison:
             defer_quality_reject(
                 45, f"眼睛閉合+低頭 (EAR: {current_ear:.4f} < 0.15 & V-Ratio: {v_ratio:.2f} < 0.60)")
 
+        face_blur_metrics = metrics.get('face_blur', {})
+        motion_unstable_for_occlusion = (
+            face_w >= 430 and
+            80 <= face_blur_metrics.get('laplacian', 999.0) < 125 and
+            face_blur_metrics.get('tenengrad', 99999.0) < 2200 and
+            abs(metrics.get('yaw', 0.0)) > 15.0 and
+            abs(metrics.get('roll_angle', 0.0)) > 14.0
+        )
+        metrics['motion_unstable_for_occlusion'] = bool(motion_unstable_for_occlusion)
+        if motion_unstable_for_occlusion:
+            return 0.0, "影像模糊 (MotionBlur)", metrics
+
         # ---------------------------------------------------------
         # 3.3 臉部特徵遮擋檢查
         # ---------------------------------------------------------
@@ -1756,6 +1775,24 @@ class Comparison:
             metrics['visual_eye_closed'] = bool(visual_eye_closed)
             if visual_eye_closed:
                 return 0.0, f"眼睛閉合 (VisualEAR: {current_ear:.4f})", metrics
+            squint_eye_closed = (
+                face_w >= 430 and
+                current_ear < 0.20 and
+                v_ratio < 0.72 and
+                abs(metrics.get('pitch', 0.0)) < 13.0 and
+                abs(metrics.get('yaw', 0.0)) < 10.0 and
+                abs(metrics.get('roll_angle', 0.0)) < 7.0 and
+                0.78 <= eye_band_metrics.get("skin_ratio", 0.0) < 0.91 and
+                eye_band_metrics.get("dark_ratio", 0.0) > 0.28 and
+                eye_band_metrics.get("laplacian", 999.0) < 55.0 and
+                eye_band_metrics.get("edge_density", 1.0) < 0.065 and
+                max(left_eye_metrics.get("bright_ratio", 1.0),
+                    right_eye_metrics.get("bright_ratio", 1.0)) < 0.015 and
+                not face_occlusion_metrics.get("near_face_skin_side_adjacent", False)
+            )
+            metrics['squint_eye_closed'] = bool(squint_eye_closed)
+            if squint_eye_closed:
+                return 0.0, f"眼睛閉合 (SquintEAR: {current_ear:.4f})", metrics
 
         if backlight_reject_msg:
             # Face light interference is secondary; pose/occlusion/blur should
@@ -1810,10 +1847,47 @@ class Comparison:
 
         return quality_score, "Pass", metrics
 
-    def _update_display_state(self, person_id):
+    def _is_success_voice_active(self, now=None):
+        token = self.display_state.get('voice_token')
+        if not token:
+            return False
+        speaker = getattr(self.system, "speaker", None)
+        if speaker is None or not hasattr(speaker, "is_token_active"):
+            return False
+        if now is None:
+            now = time.time()
+        if now >= self.display_state.get('max_hold_until', 0.0):
+            return False
+        return bool(speaker.is_token_active(token))
+
+    def _display_state_can_clear(self, now=None):
+        if now is None:
+            now = time.time()
+        if self.display_state.get('person_id') == 'None':
+            return True
+        if now < self.display_state.get('min_hold_until', 0.0):
+            return False
+        if self._is_success_voice_active(now):
+            return False
+        return True
+
+    def _update_display_state(self, person_id, voice_token=None):
         """更新當前顯示的人員ID和時間"""
+        now = time.time()
+        previous_person_id = self.display_state.get('person_id')
         self.display_state['person_id'] = person_id
-        self.display_state['last_update'] = time.time()
+        self.display_state['last_update'] = now
+        if person_id == 'None':
+            self.display_state['voice_token'] = None
+            self.display_state['min_hold_until'] = 0.0
+            self.display_state['max_hold_until'] = 0.0
+        else:
+            if voice_token is not None:
+                self.display_state['voice_token'] = voice_token
+            elif previous_person_id != person_id:
+                self.display_state['voice_token'] = None
+            self.display_state['min_hold_until'] = now + self.DISPLAY_STATE_HOLD_SECONDS
+            self.display_state['max_hold_until'] = now + self.DISPLAY_STATE_MAX_HOLD_SECONDS
         self.system.state.same_class[self.frame_num] = person_id
         # [2026-03-10 Fix] Do NOT reset clothes[] here — it causes a race condition
         # where Detector sets clothes=True but this timer-based reset clobbers it
@@ -1826,7 +1900,9 @@ class Comparison:
 
     def _clear_recognition_state(self):
         self._clear_gray_zone_state()
-        if self.display_state['person_id'] != 'None' or self.system.state.same_class[self.frame_num] != "None":
+        now = time.time()
+        if (self.display_state['person_id'] != 'None' or self.system.state.same_class[self.frame_num] != "None") and \
+           self._display_state_can_clear(now):
             self._update_display_state('None')
         self.system.state.same_people[self.frame_num] = 0.0
         self.system.state.same_zscore[self.frame_num] = 0.0
@@ -1866,7 +1942,7 @@ class Comparison:
             # [2026-02-11 Fix] Ensure display state is cleared even if no face is detected (frame_data is None)
             # This solves the issue where the sidebar avatar persists until the next detection event.
             if self.display_state['person_id'] != 'None' and \
-               now - self.display_state['last_update'] > self.DISPLAY_STATE_HOLD_SECONDS:
+               self._display_state_can_clear(now):
                 self._update_display_state('None')
 
             # [2026-01-11 Fix] 原子讀取打包數據
@@ -1964,8 +2040,7 @@ class Comparison:
             is_staff_displaying = (
                 self.display_state['person_id'] != 'None' and
                 self.display_state['person_id'] != '__VISITOR__' and
-                (now - self.display_state['last_update']
-                 < self.DISPLAY_STATE_HOLD_SECONDS)
+                not self._display_state_can_clear(now)
             )
 
             if face_width < min_face_threshold:
@@ -2500,7 +2575,7 @@ class Comparison:
                     self.system.state.success_snapshot[self.frame_num] = (
                         frame_curr.copy(), success_meta)
 
-                    self._update_display_state(predicted_id)
+                    self._update_display_state(predicted_id, voice_token=predicted_id)
 
                     # 辨識成功，播放音效與打卡
                     # [2026-01-08 Refactor] 統一使用新的打卡邏輯
@@ -2519,7 +2594,7 @@ class Comparison:
                     self.system.state.same_width[self.frame_num] = int(
                         face_width)
                 else:
-                    self._update_display_state(predicted_id)
+                    self._update_display_state(predicted_id, voice_token=predicted_id)
                     last_trigger = self.last_api_trigger_time.get(
                         predicted_id, 0)
                     if now - last_trigger > 3.0:
