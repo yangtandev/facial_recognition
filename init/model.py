@@ -1796,12 +1796,7 @@ class Comparison:
         )
         metrics['motion_unstable_for_occlusion'] = bool(motion_unstable_for_occlusion)
         if motion_unstable_for_occlusion:
-            return 0.0, "影像模糊 (MotionBlur)", metrics
-
-        if face_blur_metrics.get("is_blur", False):
-            return 0.0, "影像模糊 (BlurFace)", metrics
-        if face_blur_metrics.get("face_detail_occlusion", False):
-            return 0.0, "臉部細節遮擋 (FaceDetailOcclusion)", metrics
+            defer_quality_reject(62, "影像模糊 (MotionBlur)")
 
         pose_reject_pending = any(
             any(token in msg for token in ("抬頭", "低頭", "未正視", "姿態不良"))
@@ -1859,9 +1854,9 @@ class Comparison:
                 face_occlusion_detail = describe_face_occlusion(
                     pre_pose_occlusion_metrics)
                 metrics['face_occlusion_detail'] = face_occlusion_detail
-                return 0.0, face_occlusion_detail["quality_msg"], metrics
+                defer_quality_reject(45, face_occlusion_detail["quality_msg"])
             if pre_pose_occlusion_metrics.get("face_deformation", False):
-                return 0.0, "臉部變形 (FaceDeformation)", metrics
+                defer_quality_reject(45, "臉部變形 (FaceDeformation)")
 
         if face_w > 100 and frame_to_use is not None and not pose_reject_pending:
             face_occlusion_metrics = analyze_face_occlusion(
@@ -1878,14 +1873,14 @@ class Comparison:
                 face_occlusion_detail = describe_face_occlusion(
                     face_occlusion_metrics)
                 metrics['face_occlusion_detail'] = face_occlusion_detail
-                return 0.0, face_occlusion_detail["quality_msg"], metrics
+                defer_quality_reject(45, face_occlusion_detail["quality_msg"])
             if face_occlusion_metrics.get("face_deformation", False):
-                return 0.0, "臉部變形 (FaceDeformation)", metrics
+                defer_quality_reject(45, "臉部變形 (FaceDeformation)")
             if face_occlusion_metrics.get("face_occluded", False):
                 face_occlusion_detail = describe_face_occlusion(
                     face_occlusion_metrics)
                 metrics['face_occlusion_detail'] = face_occlusion_detail
-                return 0.0, face_occlusion_detail["quality_msg"], metrics
+                defer_quality_reject(45, face_occlusion_detail["quality_msg"])
             eye_band_metrics = metrics.get('eye_occlusion', {}).get(
                 "eye_band", {})
             left_eye_metrics = metrics.get('eye_occlusion', {}).get(
@@ -1910,7 +1905,7 @@ class Comparison:
             metrics['central_dark_strap_occlusion'] = bool(
                 central_dark_strap_occlusion)
             if central_dark_strap_occlusion:
-                return 0.0, "臉部遮擋 (FaceOcclusion)", metrics
+                defer_quality_reject(45, "臉部遮擋 (FaceOcclusion)")
             visual_eye_skin_occlusion = (
                 current_ear < 0.155 and
                 430 <= face_w < 500 and
@@ -1959,7 +1954,7 @@ class Comparison:
             )
             if front_face_hand_occlusion:
                 metrics['front_face_hand_occlusion'] = True
-                return 0.0, "臉部遮擋 (FaceOcclusion)", metrics
+                defer_quality_reject(45, "臉部遮擋 (FaceOcclusion)")
             visual_eye_closed = (
                 current_ear < 0.145 and
                 face_w >= 430 and
@@ -1969,7 +1964,7 @@ class Comparison:
             )
             metrics['visual_eye_closed'] = bool(visual_eye_closed)
             if visual_eye_closed:
-                return 0.0, f"眼睛閉合 (VisualEAR: {current_ear:.4f})", metrics
+                defer_quality_reject(70, f"眼睛閉合 (VisualEAR: {current_ear:.4f})")
             squint_eye_closed = (
                 face_w >= 430 and
                 current_ear < 0.20 and
@@ -1987,7 +1982,7 @@ class Comparison:
             )
             metrics['squint_eye_closed'] = bool(squint_eye_closed)
             if squint_eye_closed:
-                return 0.0, f"眼睛閉合 (SquintEAR: {current_ear:.4f})", metrics
+                defer_quality_reject(70, f"眼睛閉合 (SquintEAR: {current_ear:.4f})")
 
         if backlight_reject_msg:
             # Face light interference is secondary; pose/occlusion/blur should
@@ -2494,9 +2489,7 @@ class Comparison:
                                 )
                             )
                         )
-                        direct_low_texture_recognition_reject = (
-                            feature_low_texture_quality_risk
-                        )
+                        direct_low_texture_recognition_reject = False
                         if direct_low_texture_recognition_reject:
                             quality_metrics['direct_low_texture_recognition_reject'] = True
                             quality_metrics['regional_low_texture_quality_risk'] = bool(

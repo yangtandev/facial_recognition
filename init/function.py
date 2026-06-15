@@ -3498,7 +3498,9 @@ def analyze_face_blur(frame, box, pose=None):
             normalized_detail_blur_reject or
             huge_face_low_texture_blur or
             dark_low_texture_blur or
-            rain_droplet_blur
+            rain_droplet_blur or
+            face_detail_occlusion or
+            wet_lens_vertical_smear_occlusion
         )
 
         return {
