@@ -58,7 +58,7 @@ CAMERA = {0: "inCamera", 1: "outCamera"}
 CAM_NAME_MAP = {0: "入口", 1: "出口"}
 POTENTIAL_MISS_RATIO = 0.8
 Z_SCORE_THRESHOLD = 1.5
-QUALITY_RULE_VERSION = "2026-06-15.4"
+QUALITY_RULE_VERSION = "2026-06-15.6"
 
 test_img = cv2.imread(os.path.join(
     os.path.dirname(__file__), "../other/test_img.jpg"))
@@ -1376,9 +1376,13 @@ class Comparison:
         # 1. 畫面置中檢查 (Center Alignment) - UI 需求
         # ---------------------------------------------------------
         face_center_x = (box[0] + box[2]) / 2
+        face_center_y = (box[1] + box[3]) / 2
         frame_center_x = frame_w / 2
+        frame_center_y = frame_h / 2
         offset = abs(face_center_x - frame_center_x)
+        offset_y = abs(face_center_y - frame_center_y)
         limit_offset = frame_w * 0.15  # 允許偏離 15%
+        limit_offset_y = frame_h * 0.18
         margin = 5
         face_w = max(10, box[2] - box[0])
         face_h = max(10, box[3] - box[1])
@@ -1390,6 +1394,8 @@ class Comparison:
         metrics = {
             'center_offset_px': float(offset),
             'center_limit_px': float(limit_offset),
+            'center_offset_y_px': float(offset_y),
+            'center_limit_y_px': float(limit_offset_y),
             'face_width_px': float(face_w),
             'face_height_px': float(face_h),
             'face_top_px': float(box[1]),
@@ -1410,6 +1416,8 @@ class Comparison:
 
         if offset > limit_offset:
             return 0.0, f"未置中 (偏離 {offset:.1f}px > 容許 {limit_offset:.1f}px)", metrics
+        if offset_y > limit_offset_y:
+            return 0.0, f"未置中 (垂直偏離 {offset_y:.1f}px > 容許 {limit_offset_y:.1f}px)", metrics
 
         # ---------------------------------------------------------
         # 2. 特徵點完整性檢查 (Visibility) - 完整性需求
@@ -1616,6 +1624,18 @@ class Comparison:
                     metrics['pitch_check'] = 'Fail (Combo Low+Cover)'
                     defer_quality_reject(
                         58, f"低頭/遮眼 (V {v_ratio:.2f}<0.42 & EAR {current_ear:.2f}<0.22)")
+
+            low_head_pose_hard_reject = (
+                metrics.get('pitch', 0.0) <= -14.5 and
+                v_ratio < 0.65 and
+                current_ear > 0.16 and
+                abs(metrics.get('roll_angle', 0.0)) < 18.0
+            )
+            metrics['low_head_pose_hard_reject'] = bool(
+                low_head_pose_hard_reject)
+            if low_head_pose_hard_reject:
+                metrics['pitch_check'] = 'Fail (Pitch Low Head)'
+                return 0.0, f"低頭 (Pitch:{metrics.get('pitch', 0.0):.1f}, V-Ratio:{v_ratio:.2f})", metrics
 
             # [2026-05-04 Fix v2] 抬頭/眼睛超出畫面上限過濾
             # 根因：當人抬頭或仰頭使眼睛離開畫面時，v_ratio 會異常升高。
@@ -2436,6 +2456,37 @@ class Comparison:
                                 )
                             )
                         )
+                        direct_low_texture_quality_reject = (
+                            feature_low_texture_quality_risk
+                        )
+                        if direct_low_texture_quality_reject:
+                            quality_metrics['direct_low_texture_quality_reject'] = True
+                            quality_metrics['regional_low_texture_quality_risk'] = bool(
+                                regional_low_texture_quality_risk)
+                            quality_metrics['feature_low_texture_quality_risk'] = bool(
+                                feature_low_texture_quality_risk)
+                            quality_metrics['quality_reject_reason'] = "quality_影像模糊_(BlurFace)"
+                            LOGGER.info(
+                                f"[{camera_name}][畫質過濾] 影像模糊 DirectLowTexture - 拒絕辨識")
+                            if face_width >= min_face_threshold and now - self.last_potential_miss_log_time > 1.0:
+                                try:
+                                    snapshot = _frame
+                                    if snapshot is not None:
+                                        reason_str = quality_metrics['quality_reject_reason']
+                                        saved_path = self._save_potential_miss_image(
+                                            snapshot, face_width, min_face_threshold, camera_name, reason=reason_str)
+                                        if saved_path:
+                                            self._save_potential_miss_json(
+                                                saved_path, quality_metrics, reason_str,
+                                                frame=snapshot, packet_meta=_packet_meta, box=_box)
+                                        self.last_potential_miss_log_time = now
+                                except:
+                                    pass
+
+                            self._show_unrecognized_hint(
+                                now, camera_name, "BlurFace",
+                                confidence, z_score, gap)
+                            continue
                         mid_texture_ambiguous = (
                             400 <= face_width < 430 and
                             20 <= face_blur_metrics.get('laplacian', 999) < 30 and

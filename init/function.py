@@ -2137,7 +2137,7 @@ def analyze_face_occlusion(frame, mesh_points=None, points=None, box=None, gaze_
         left_eye_stats = eye_metrics.get("left_eye", {}) if isinstance(eye_metrics, dict) else {}
         right_eye_stats = eye_metrics.get("right_eye", {}) if isinstance(eye_metrics, dict) else {}
         normal_frontal_detail_context = (
-            face_box_w >= 430.0 and
+            face_box_w >= 100.0 and
             not severe_face_underexposed and
             abs(gaze["yaw"]) <= 16.0 and
             abs(gaze["roll"]) <= 15.0 and
@@ -2159,13 +2159,33 @@ def analyze_face_occlusion(frame, mesh_points=None, points=None, box=None, gaze_
             skin_component["vertical_overlap_ratio"] > 0.36 or
             near_face_foreground_distance_ratio <= 0.02
         )
-        skin_like_lower_feature_loss = (
+        lower_feature_foreground_evidence = (
+            near_face_foreground_occlusion or
+            near_lens_foreground_occlusion or
+            near_face_skin_component_ratio >= 0.24 or
+            (
+                near_face_skin_component_ratio >= 0.18 and
+                (
+                    skin_component["side_adjacent"] or
+                    skin_component["vertical_overlap_ratio"] > 0.36
+                )
+            )
+        )
+        lower_feature_detail_loss = (
             normal_frontal_detail_context and
-            430.0 <= face_box_w < 455.0 and
-            -17.0 <= gaze["pitch"] <= -9.0 and
-            0.62 <= local_v_ratio <= 0.85 and
-            0.32 <= near_face_skin_component_ratio <= 0.48 and
             lower_feature_missing_score >= 7 and
+            lower_feature_foreground_evidence and
+            (
+                near_face_skin_component_ratio >= 0.18 or
+                mouth_stats["edge_density"] < 0.020 or
+                nose_stats["edge_density"] < 0.055 or
+                lower_box_stats["edge_density"] < 0.040 or
+                mouth_stats["laplacian"] < 22.0 or
+                nose_stats["laplacian"] < 40.0
+            )
+        )
+        skin_like_lower_feature_loss = (
+            lower_feature_detail_loss and
             not high_head_visible_lower_face and
             not high_head_closed_eye_visible_lower_face and
             not hood_visible_nose_mouth and
@@ -2364,6 +2384,10 @@ def analyze_face_occlusion(frame, mesh_points=None, points=None, box=None, gaze_
             cheek_squeeze_deformation)
         result["skin_like_lower_feature_loss"] = bool(
             skin_like_lower_feature_loss)
+        result["lower_feature_detail_loss"] = bool(
+            lower_feature_detail_loss)
+        result["lower_feature_foreground_evidence"] = bool(
+            lower_feature_foreground_evidence)
         result["lower_feature_missing_score"] = int(
             lower_feature_missing_score)
         result["large_side_skin_eye_hand_cover"] = bool(
@@ -3219,6 +3243,19 @@ def analyze_face_blur(frame, box, pose=None):
             bright_ratio < 0.18 and
             very_bright_ratio < 0.08
         )
+        medium_vertical_motion_blur = (
+            400 <= face_w < 470 and
+            pose_yaw < 16.0 and
+            lap < 24.0 and
+            tenengrad < 1300.0 and
+            normalized_lap < 26.0 and
+            normalized_tenengrad < 1900.0 and
+            normalized_edge_density < 0.032 and
+            normalized_std_y > 30.0 and
+            0.10 <= vertical_smear_width_ratio <= 0.25 and
+            vertical_smear_strength >= 35.0 and
+            vertical_smear_edge_density < 0.026
+        )
         large_motion_smear_blur = (
             490 <= face_w < 540 and
             60 <= lap < 85 and
@@ -3266,6 +3303,14 @@ def analyze_face_blur(frame, box, pose=None):
             normalized_tenengrad < 1700.0 and
             normalized_edge_density < 0.018 and
             normalized_std_y < 42.0
+        )
+        normalized_detail_blur_reject = (
+            pose_yaw < 18.0 and
+            normalized_std_y < 42.0 and
+            (
+                normalized_detail_soft_blur or
+                normalized_low_detail_soft_blur
+            )
         )
         dark_low_texture_blur = (
             lap < 25 and
@@ -3373,7 +3418,7 @@ def analyze_face_blur(frame, box, pose=None):
         face_detail_occlusion = wet_lens_low_detail_occlusion
 
         return {
-            "is_blur": bool(normalized_hard_blur or normalized_low_texture_blur or normalized_motion_blur or large_borderline_soft_blur or severe_low_texture_blur or mid_low_texture_blur or low_light_small_face_blur or low_light_tiny_face_blur or bright_tiny_face_low_texture_blur or bright_small_face_low_texture_blur or frontal_bright_low_texture_blur or bright_low_texture_blur or visible_low_texture_blur or medium_face_low_texture_blur or glare_smear_blur or blur_small_face_glare or side_motion_blur or medium_dark_soft_blur or large_motion_smear_blur or large_low_detail_blur or large_soft_motion_blur or large_frontal_low_texture_blur or normalized_low_detail_soft_blur or huge_face_low_texture_blur or dark_low_texture_blur or rain_droplet_blur),
+            "is_blur": bool(normalized_hard_blur or normalized_low_texture_blur or normalized_motion_blur or large_borderline_soft_blur or severe_low_texture_blur or mid_low_texture_blur or low_light_small_face_blur or low_light_tiny_face_blur or bright_tiny_face_low_texture_blur or bright_small_face_low_texture_blur or frontal_bright_low_texture_blur or bright_low_texture_blur or visible_low_texture_blur or medium_face_low_texture_blur or glare_smear_blur or blur_small_face_glare or side_motion_blur or medium_dark_soft_blur or medium_vertical_motion_blur or large_motion_smear_blur or large_low_detail_blur or large_soft_motion_blur or large_frontal_low_texture_blur or normalized_detail_blur_reject or huge_face_low_texture_blur or dark_low_texture_blur or rain_droplet_blur or feature_low_texture_quality_risk or wet_lens_low_texture_quality_risk),
             "laplacian": lap,
             "tenengrad": tenengrad,
             "normalized_laplacian": normalized_lap,
@@ -3402,12 +3447,14 @@ def analyze_face_blur(frame, box, pose=None):
             "blur_small_face_glare": bool(blur_small_face_glare),
             "side_motion_blur": bool(side_motion_blur),
             "medium_dark_soft_blur": bool(medium_dark_soft_blur),
+            "medium_vertical_motion_blur": bool(medium_vertical_motion_blur),
             "large_motion_smear_blur": bool(large_motion_smear_blur),
             "large_low_detail_blur": bool(large_low_detail_blur),
             "large_soft_motion_blur": bool(large_soft_motion_blur),
             "large_frontal_low_texture_blur": bool(large_frontal_low_texture_blur),
             "normalized_detail_soft_blur": bool(normalized_detail_soft_blur),
             "normalized_low_detail_soft_blur": bool(normalized_low_detail_soft_blur),
+            "normalized_detail_blur_reject": bool(normalized_detail_blur_reject),
             "huge_face_low_texture_blur": bool(huge_face_low_texture_blur),
             "rain_droplet_blur": bool(rain_droplet_blur),
             "face_detail_occlusion": bool(face_detail_occlusion),
