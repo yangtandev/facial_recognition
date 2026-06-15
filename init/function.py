@@ -2136,6 +2136,75 @@ def analyze_face_occlusion(frame, mesh_points=None, points=None, box=None, gaze_
         eye_band_stats = eye_metrics.get("eye_band", {}) if isinstance(eye_metrics, dict) else {}
         left_eye_stats = eye_metrics.get("left_eye", {}) if isinstance(eye_metrics, dict) else {}
         right_eye_stats = eye_metrics.get("right_eye", {}) if isinstance(eye_metrics, dict) else {}
+        normal_frontal_detail_context = (
+            face_box_w >= 430.0 and
+            not severe_face_underexposed and
+            abs(gaze["yaw"]) <= 16.0 and
+            abs(gaze["roll"]) <= 15.0 and
+            -18.0 <= gaze["pitch"] <= 10.0 and
+            0.45 <= local_v_ratio <= 1.05 and
+            nose_stats.get("valid", False) and
+            lower_box_stats["valid"]
+        )
+        lower_feature_missing_score = 0
+        lower_feature_missing_score += int(mouth_skin > 0.80)
+        lower_feature_missing_score += int(nose_skin > 0.80)
+        lower_feature_missing_score += int(lower_box_skin > 0.78)
+        lower_feature_missing_score += int(mouth_stats["edge_density"] < 0.050)
+        lower_feature_missing_score += int(nose_stats["edge_density"] < 0.075)
+        lower_feature_missing_score += int(lower_box_stats["edge_density"] < 0.050)
+        lower_feature_missing_score += int(near_face_skin_component_ratio > 0.32)
+        lower_feature_missing_score += int(
+            skin_component["side_adjacent"] or
+            skin_component["vertical_overlap_ratio"] > 0.36 or
+            near_face_foreground_distance_ratio <= 0.02
+        )
+        skin_like_lower_feature_loss = (
+            normal_frontal_detail_context and
+            430.0 <= face_box_w < 455.0 and
+            -17.0 <= gaze["pitch"] <= -9.0 and
+            0.62 <= local_v_ratio <= 0.85 and
+            0.32 <= near_face_skin_component_ratio <= 0.48 and
+            lower_feature_missing_score >= 7 and
+            not high_head_visible_lower_face and
+            not high_head_closed_eye_visible_lower_face and
+            not hood_visible_nose_mouth and
+            not (
+                mouth_skin > 0.95 and
+                nose_skin > 0.95 and
+                lower_box_skin > 0.95 and
+                lower_box_mean < face_mean + 8.0 and
+                near_face_skin_component_ratio < 0.30
+            )
+        )
+        mouth_expression_deformation = (
+            normal_frontal_detail_context and
+            near_face_skin_component_ratio < 0.30 and
+            0.62 <= local_v_ratio <= 0.95 and
+            mouth_stats["dark_ratio"] > 0.18 and
+            (
+                (mouth_skin < 0.88 and mouth_stats["edge_density"] < 0.055) or
+                (mouth_skin > 0.90 and mouth_stats["edge_density"] < 0.023) or
+                (mouth_skin < 0.91 and lower_box_skin < 0.90 and mouth_stats["dark_ratio"] > 0.22) or
+                (
+                    gaze["ear"] is not None and
+                    gaze["ear"] < 0.20 and
+                    lower_box_skin < 0.88
+                )
+            )
+        )
+        cheek_squeeze_deformation = (
+            normal_frontal_detail_context and
+            0.45 <= local_v_ratio <= 0.62 and
+            abs(gaze["pitch"]) <= 8.0 and
+            near_face_skin_component_ratio > 0.50 and
+            lower_box_skin > 0.78 and
+            mouth_skin < 0.78 and
+            mouth_stats["dark_ratio"] > 0.45
+        )
+        expression_deformation = (
+            mouth_expression_deformation or cheek_squeeze_deformation
+        )
         large_side_skin_eye_hand_cover = (
             isinstance(eye_metrics, dict) and
             not eye_metrics.get("eye_occluded", False) and
@@ -2277,7 +2346,7 @@ def analyze_face_occlusion(frame, mesh_points=None, points=None, box=None, gaze_
                     eye_band_stats.get("edge_density", 1.0) < 0.010
                 )
             )
-        )
+        ) or expression_deformation
 
         result["low_head_visible_nose"] = bool(low_head_visible_nose)
         result["high_head_visible_lower_face"] = bool(
@@ -2288,6 +2357,15 @@ def analyze_face_occlusion(frame, mesh_points=None, points=None, box=None, gaze_
         result["normal_pose_visible_lower_face"] = bool(
             normal_pose_visible_lower_face)
         result["face_deformation"] = bool(face_deformation)
+        result["expression_deformation"] = bool(expression_deformation)
+        result["mouth_expression_deformation"] = bool(
+            mouth_expression_deformation)
+        result["cheek_squeeze_deformation"] = bool(
+            cheek_squeeze_deformation)
+        result["skin_like_lower_feature_loss"] = bool(
+            skin_like_lower_feature_loss)
+        result["lower_feature_missing_score"] = int(
+            lower_feature_missing_score)
         result["large_side_skin_eye_hand_cover"] = bool(
             large_side_skin_eye_hand_cover)
         result["large_center_skin_eye_hand_cover"] = bool(
@@ -2345,6 +2423,7 @@ def analyze_face_occlusion(frame, mesh_points=None, points=None, box=None, gaze_
             skin_colored_lower_cover or
             skin_colored_mouth_cover or
             skin_colored_nose_cover or
+            skin_like_lower_feature_loss or
             near_lens_foreground_occlusion or
             near_face_foreground_occlusion
         )
@@ -2376,6 +2455,8 @@ def analyze_face_occlusion(frame, mesh_points=None, points=None, box=None, gaze_
                 result["reason"] = "nose_mouth_occluded"
             elif skin_colored_nose_cover:
                 result["reason"] = "skin_colored_nose_cover"
+            elif skin_like_lower_feature_loss:
+                result["reason"] = "skin_like_lower_feature_loss"
             elif skin_colored_mouth_cover:
                 result["reason"] = "skin_colored_mouth_cover"
             elif skin_colored_lower_cover:
@@ -2431,12 +2512,13 @@ def describe_face_occlusion(metrics):
         "skin_colored_palm_nose_mouth_cover",
         "skin_colored_palm_nose_mouth_tip_cover",
         "skin_colored_nose_mouth_hand_cover",
+        "skin_like_lower_feature_loss",
     ):
         detail.update({
-            "display_text": "口鼻被遮擋",
-            "voice_text": "口鼻被遮擋",
-            "voice_key": "hint_nose_mouth_occluded",
-            "quality_msg": "口鼻遮擋 (NoseMouthOcclusion)",
+            "display_text": "無法識別" if reason == "skin_like_lower_feature_loss" else "口鼻被遮擋",
+            "voice_text": "無法識別" if reason == "skin_like_lower_feature_loss" else "口鼻被遮擋",
+            "voice_key": "hint_unrecognized" if reason == "skin_like_lower_feature_loss" else "hint_nose_mouth_occluded",
+            "quality_msg": "臉部細節遮擋 (FaceDetailOcclusion)" if reason == "skin_like_lower_feature_loss" else "口鼻遮擋 (NoseMouthOcclusion)",
             "part": "nose_mouth",
         })
     elif reason in ("skin_colored_nose_cover",):
@@ -3167,6 +3249,24 @@ def analyze_face_blur(frame, box, pose=None):
             lap < 23 and
             tenengrad < 430
         )
+        normalized_detail_soft_blur = (
+            face_w >= 400 and
+            pose_yaw < 14.0 and
+            28.0 <= lap < 52.0 and
+            normalized_lap < 36.0 and
+            normalized_tenengrad < 3200.0 and
+            normalized_edge_density < 0.048 and
+            normalized_std_y < 42.0
+        )
+        normalized_low_detail_soft_blur = (
+            face_w >= 400 and
+            pose_yaw < 14.0 and
+            18.0 <= lap < 28.0 and
+            normalized_lap < 16.0 and
+            normalized_tenengrad < 1700.0 and
+            normalized_edge_density < 0.018 and
+            normalized_std_y < 42.0
+        )
         dark_low_texture_blur = (
             lap < 25 and
             tenengrad < 500 and # [2026-06-10 Fix] Strict tenengrad to separate clear large faces (ten=535) from blurry (ten=493)
@@ -3273,7 +3373,7 @@ def analyze_face_blur(frame, box, pose=None):
         face_detail_occlusion = wet_lens_low_detail_occlusion
 
         return {
-            "is_blur": bool(normalized_hard_blur or normalized_low_texture_blur or normalized_motion_blur or large_borderline_soft_blur or severe_low_texture_blur or mid_low_texture_blur or low_light_small_face_blur or low_light_tiny_face_blur or bright_tiny_face_low_texture_blur or bright_small_face_low_texture_blur or frontal_bright_low_texture_blur or bright_low_texture_blur or visible_low_texture_blur or medium_face_low_texture_blur or glare_smear_blur or blur_small_face_glare or side_motion_blur or medium_dark_soft_blur or large_motion_smear_blur or large_low_detail_blur or large_soft_motion_blur or large_frontal_low_texture_blur or huge_face_low_texture_blur or dark_low_texture_blur or rain_droplet_blur),
+            "is_blur": bool(normalized_hard_blur or normalized_low_texture_blur or normalized_motion_blur or large_borderline_soft_blur or severe_low_texture_blur or mid_low_texture_blur or low_light_small_face_blur or low_light_tiny_face_blur or bright_tiny_face_low_texture_blur or bright_small_face_low_texture_blur or frontal_bright_low_texture_blur or bright_low_texture_blur or visible_low_texture_blur or medium_face_low_texture_blur or glare_smear_blur or blur_small_face_glare or side_motion_blur or medium_dark_soft_blur or large_motion_smear_blur or large_low_detail_blur or large_soft_motion_blur or large_frontal_low_texture_blur or normalized_low_detail_soft_blur or huge_face_low_texture_blur or dark_low_texture_blur or rain_droplet_blur),
             "laplacian": lap,
             "tenengrad": tenengrad,
             "normalized_laplacian": normalized_lap,
@@ -3306,6 +3406,8 @@ def analyze_face_blur(frame, box, pose=None):
             "large_low_detail_blur": bool(large_low_detail_blur),
             "large_soft_motion_blur": bool(large_soft_motion_blur),
             "large_frontal_low_texture_blur": bool(large_frontal_low_texture_blur),
+            "normalized_detail_soft_blur": bool(normalized_detail_soft_blur),
+            "normalized_low_detail_soft_blur": bool(normalized_low_detail_soft_blur),
             "huge_face_low_texture_blur": bool(huge_face_low_texture_blur),
             "rain_droplet_blur": bool(rain_droplet_blur),
             "face_detail_occlusion": bool(face_detail_occlusion),

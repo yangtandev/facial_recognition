@@ -58,7 +58,7 @@ CAMERA = {0: "inCamera", 1: "outCamera"}
 CAM_NAME_MAP = {0: "入口", 1: "出口"}
 POTENTIAL_MISS_RATIO = 0.8
 Z_SCORE_THRESHOLD = 1.5
-QUALITY_RULE_VERSION = "2026-06-15.3"
+QUALITY_RULE_VERSION = "2026-06-15.4"
 
 test_img = cv2.imread(os.path.join(
     os.path.dirname(__file__), "../other/test_img.jpg"))
@@ -1801,6 +1801,7 @@ class Comparison:
                     "skin_colored_palm_mouth_cover_lower_box",
                     "skin_colored_mouth_cover",
                     "skin_colored_lower_cover",
+                    "skin_like_lower_feature_loss",
                 }
             )
             metrics['high_conf_pre_pose_eye_occlusion'] = bool(
