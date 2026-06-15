@@ -1184,6 +1184,10 @@ def analyze_eye_occlusion(frame, mesh_points=None, box=None, gaze_status=None):
                 face_box_w >= 430.0 and
                 eye_dist > 260.0 and
                 face_stats["skin_ratio"] > 0.70 and
+                (
+                    other_stats["edge_density"] > 0.002 or
+                    other_stats["laplacian"] > 8.0
+                ) and
                 other_stats["skin_ratio"] > 0.88 and
                 other_stats["dark_ratio"] < 0.12 and
                 eye_stats["skin_ratio"] > 0.74 and
@@ -1906,9 +1910,45 @@ def analyze_face_occlusion(frame, mesh_points=None, points=None, box=None, gaze_
             mouth_stats["edge_density"] < 0.024 and
             lower_box_stats["edge_density"] < 0.024
         )
+        low_head_visible_nose = (
+            generic_lower_resolution_ok and
+            nose_stats.get("valid", False) and
+            lower_box_stats["valid"] and
+            -22.0 <= gaze["pitch"] <= -10.0 and
+            abs(gaze["yaw"]) <= 14.0 and
+            local_v_ratio < 0.52 and
+            nose_skin > 0.92 and
+            mouth_skin > 0.90 and
+            nose_stats["dark_ratio"] < 0.16 and
+            mouth_stats["dark_ratio"] < 0.16 and
+            nose_stats["edge_density"] < 0.036 and
+            mouth_stats["edge_density"] < 0.038
+        )
+        hood_visible_nose_mouth = (
+            generic_lower_resolution_ok and
+            nose_stats.get("valid", False) and
+            lower_box_stats["valid"] and
+            not severe_face_underexposed and
+            abs(gaze["yaw"]) <= 12.0 and
+            abs(gaze["roll"]) <= 12.0 and
+            0.55 <= local_v_ratio <= 1.25 and
+            nose_skin > 0.92 and
+            mouth_skin > 0.90 and
+            nose_stats["dark_ratio"] < 0.16 and
+            mouth_stats["dark_ratio"] < 0.16 and
+            nose_stats["edge_density"] < 0.020 and
+            mouth_stats["edge_density"] < 0.020 and
+            face_stats["dark_ratio"] > 0.24 and
+            lower_box_stats["dark_ratio"] > 0.24 and
+            lower_box_skin < 0.82 and
+            near_face_skin_component_ratio < 0.14 and
+            not skin_component["side_adjacent"]
+        )
         skin_colored_nose_cover = (
             generic_lower_resolution_ok and
             not severe_face_underexposed and
+            not low_head_visible_nose and
+            not hood_visible_nose_mouth and
             nose_stats.get("valid", False) and
             lower_box_stats["valid"] and
             face_mean >= 60 and
@@ -1923,13 +1963,74 @@ def analyze_face_occlusion(frame, mesh_points=None, points=None, box=None, gaze_
             lower_box_skin < 0.78 and
             lower_box_stats["dark_ratio"] > 0.26
         )
+        high_head_visible_lower_face = (
+            generic_lower_resolution_ok and
+            nose_stats.get("valid", False) and
+            lower_box_stats["valid"] and
+            gaze["pitch"] > 6.0 and
+            local_v_ratio > 1.35 and
+            abs(gaze["yaw"]) <= 18.0 and
+            abs(gaze["roll"]) <= 10.0 and
+            mouth_skin > 0.88 and
+            nose_skin > 0.88 and
+            lower_box_skin > 0.82 and
+            mouth_stats["dark_ratio"] < 0.24 and
+            nose_stats["dark_ratio"] < 0.18 and
+            lower_box_stats["dark_ratio"] < 0.24 and
+            mouth_stats["edge_density"] < 0.012 and
+            nose_stats["edge_density"] < 0.012 and
+            lower_box_stats["edge_density"] < 0.014
+        )
+        high_head_closed_eye_visible_lower_face = (
+            generic_lower_resolution_ok and
+            nose_stats.get("valid", False) and
+            lower_box_stats["valid"] and
+            not severe_face_underexposed and
+            gaze["pitch"] > 6.0 and
+            1.15 <= local_v_ratio <= 1.45 and
+            gaze["ear"] is not None and
+            gaze["ear"] < 0.12 and
+            abs(gaze["yaw"]) <= 12.0 and
+            abs(gaze["roll"]) <= 10.0 and
+            nose_skin > 0.92 and
+            mouth_skin > 0.93 and
+            mouth_stats["dark_ratio"] < 0.14 and
+            nose_stats["dark_ratio"] < 0.14 and
+            mouth_stats["edge_density"] < 0.012 and
+            nose_stats["edge_density"] < 0.012 and
+            near_face_skin_component_ratio < 0.20
+        )
+        normal_pose_visible_lower_face = (
+            generic_lower_resolution_ok and
+            nose_stats.get("valid", False) and
+            lower_box_stats["valid"] and
+            not severe_face_underexposed and
+            abs(gaze["pitch"]) <= 8.0 and
+            abs(gaze["yaw"]) <= 15.0 and
+            abs(gaze["roll"]) <= 10.0 and
+            0.70 <= local_v_ratio <= 1.05 and
+            nose_skin > 0.92 and
+            mouth_skin > 0.90 and
+            lower_box_skin > 0.86 and
+            nose_stats["dark_ratio"] < 0.16 and
+            mouth_stats["dark_ratio"] < 0.16 and
+            lower_box_stats["dark_ratio"] < 0.18 and
+            near_face_skin_component_ratio > 0.48 and
+            not skin_component["side_adjacent"]
+        )
         skin_colored_nose_mouth_hand_cover = (
             generic_lower_resolution_ok and
             (pose_occlusion_context or lower_box_stats["mean_y"] > face_mean + 8.0) and # [2026-06-09 Fix v4] Allow normal pose if bright hand is present
+            not high_head_visible_lower_face and
+            not high_head_closed_eye_visible_lower_face and
+            not hood_visible_nose_mouth and
+            not normal_pose_visible_lower_face and
             not mouth_nose_clearly_visible and  # [2026-06-09 Fix v2] 口鼻膚色完美可見(>0.85)時不觸發
             not (mouth_skin > 0.95 and nose_skin > 0.95 and lower_box_stats["mean_y"] < face_mean + 8.0) and # [2026-06-09 Fix v3] 完全膚色且無遮擋且不亮時才放行，若太亮可能是手
 
 
+            -12.0 <= gaze["pitch"] <= 14.0 and
+            0.52 <= local_v_ratio <= 1.28 and
             abs(gaze["yaw"]) <= 15.0 and
             abs(gaze["roll"]) <= 15.0 and
             not severe_face_underexposed and
@@ -2035,6 +2136,51 @@ def analyze_face_occlusion(frame, mesh_points=None, points=None, box=None, gaze_
         eye_band_stats = eye_metrics.get("eye_band", {}) if isinstance(eye_metrics, dict) else {}
         left_eye_stats = eye_metrics.get("left_eye", {}) if isinstance(eye_metrics, dict) else {}
         right_eye_stats = eye_metrics.get("right_eye", {}) if isinstance(eye_metrics, dict) else {}
+        large_side_skin_eye_hand_cover = (
+            isinstance(eye_metrics, dict) and
+            not eye_metrics.get("eye_occluded", False) and
+            eye_metrics.get("reason") == "shadowed_skin_visible" and
+            generic_lower_resolution_ok and
+            not severe_face_underexposed and
+            face_box_w >= 540.0 and
+            abs(gaze["pitch"]) <= 13.0 and
+            abs(gaze["yaw"]) <= 32.0 and
+            abs(gaze["roll"]) <= 15.0 and
+            skin_component["side_adjacent"] and
+            0.12 <= near_face_skin_component_ratio <= 0.55 and
+            skin_component["vertical_overlap_ratio"] > 0.65 and
+            skin_component["height_ratio"] > 0.48 and
+            eye_band_stats.get("skin_ratio", 0.0) > 0.90 and
+            eye_band_stats.get("dark_ratio", 1.0) < 0.18 and
+            eye_band_stats.get("edge_density", 1.0) < 0.032 and
+            left_eye_stats.get("skin_ratio", 0.0) > 0.82 and
+            right_eye_stats.get("skin_ratio", 0.0) > 0.82 and
+            abs(left_eye_stats.get("mean_y", 0.0) -
+                right_eye_stats.get("mean_y", 0.0)) > 20.0
+        )
+        large_center_skin_eye_hand_cover = (
+            isinstance(eye_metrics, dict) and
+            not eye_metrics.get("eye_occluded", False) and
+            eye_metrics.get("reason") == "shadowed_skin_visible" and
+            generic_lower_resolution_ok and
+            not severe_face_underexposed and
+            face_box_w >= 540.0 and
+            abs(gaze["pitch"]) <= 8.0 and
+            abs(gaze["yaw"]) <= 26.0 and
+            abs(gaze["roll"]) <= 10.0 and
+            0.24 <= near_face_skin_component_ratio <= 0.60 and
+            skin_component["vertical_overlap_ratio"] > 0.50 and
+            skin_component["height_ratio"] > 0.50 and
+            eye_band_stats.get("skin_ratio", 0.0) > 0.86 and
+            0.14 < eye_band_stats.get("dark_ratio", 0.0) < 0.24 and
+            eye_band_stats.get("edge_density", 1.0) < 0.010 and
+            max(left_eye_stats.get("dark_ratio", 0.0),
+                right_eye_stats.get("dark_ratio", 0.0)) > 0.25 and
+            max(left_eye_stats.get("edge_density", 1.0),
+                right_eye_stats.get("edge_density", 1.0)) < 0.014 and
+            abs(left_eye_stats.get("mean_y", 0.0) -
+                right_eye_stats.get("mean_y", 0.0)) > 6.5
+        )
         broad_eye_skin_hand_cover = (
             isinstance(eye_metrics, dict) and
             not eye_metrics.get("eye_occluded", False) and
@@ -2088,11 +2234,84 @@ def analyze_face_occlusion(frame, mesh_points=None, points=None, box=None, gaze_
             mouth_stats["laplacian"] < 36.0 and
             mouth_mean < face_mean - 8.0
         )
+        face_deformation = (
+            generic_lower_resolution_ok and
+            not severe_face_underexposed and
+            abs(gaze["yaw"]) <= 18.0 and
+            abs(gaze["roll"]) <= 15.0 and
+            not (gaze["pitch"] > 14.0 and local_v_ratio > 1.18) and
+            0.75 <= local_v_ratio <= 2.20 and
+            nose_stats.get("valid", False) and
+            nose_skin > 0.82 and
+            mouth_skin > 0.74 and
+            nose_stats["dark_ratio"] < 0.22 and
+            near_face_skin_component_ratio < 0.45 and
+            not near_face_foreground_occlusion and
+            (
+                (
+                    gaze["ear"] is not None and
+                    gaze["ear"] < 0.16 and
+                    (
+                        local_v_ratio <= 1.18 or
+                        (1.18 < local_v_ratio <= 1.45 and gaze["ear"] < 0.08) or
+                        (local_v_ratio > 1.45 and gaze["ear"] < 0.08)
+                    )
+                ) or
+                (mouth_skin < 0.84 and mouth_stats["dark_ratio"] > 0.18) or
+                (
+                    local_v_ratio > 1.45 and
+                    mouth_stats["dark_ratio"] > 0.12 and
+                    mouth_stats["edge_density"] < 0.012
+                ) or
+                (
+                    local_v_ratio > 1.18 and
+                    gaze["pitch"] <= 6.0 and
+                    eye_band_stats.get("dark_ratio", 0.0) > 0.16 and
+                    eye_band_stats.get("edge_density", 1.0) < 0.014
+                ) or
+                (
+                    local_v_ratio < 1.02 and
+                    gaze["ear"] is not None and
+                    gaze["ear"] < 0.09 and
+                    eye_band_stats.get("dark_ratio", 0.0) > 0.16 and
+                    eye_band_stats.get("edge_density", 1.0) < 0.010
+                )
+            )
+        )
 
-        if broad_eye_skin_hand_cover or skin_like_eye_feature_cover:
+        result["low_head_visible_nose"] = bool(low_head_visible_nose)
+        result["high_head_visible_lower_face"] = bool(
+            high_head_visible_lower_face)
+        result["high_head_closed_eye_visible_lower_face"] = bool(
+            high_head_closed_eye_visible_lower_face)
+        result["hood_visible_nose_mouth"] = bool(hood_visible_nose_mouth)
+        result["normal_pose_visible_lower_face"] = bool(
+            normal_pose_visible_lower_face)
+        result["face_deformation"] = bool(face_deformation)
+        result["large_side_skin_eye_hand_cover"] = bool(
+            large_side_skin_eye_hand_cover)
+        result["large_center_skin_eye_hand_cover"] = bool(
+            large_center_skin_eye_hand_cover)
+
+        if face_deformation:
+            result["reason"] = "face_deformation"
+            return result
+
+        if large_side_skin_eye_hand_cover or large_center_skin_eye_hand_cover or broad_eye_skin_hand_cover or skin_like_eye_feature_cover:
             eye_metrics["eye_occluded"] = True
-            if skin_like_eye_feature_cover and abs(left_eye_stats.get("mean_y", 0.0) -
-                                                  right_eye_stats.get("mean_y", 0.0)) > 28.0:
+            if large_side_skin_eye_hand_cover or large_center_skin_eye_hand_cover:
+                eye_metrics["reason"] = (
+                    "large_side_skin_eye_hand_cover"
+                    if large_side_skin_eye_hand_cover
+                    else "large_center_skin_eye_hand_cover"
+                )
+                eye_metrics["occluded_eye_side"] = (
+                    left_eye_stats.get("dark_ratio", 0.0) > right_eye_stats.get("dark_ratio", 0.0)
+                    and (eye_metrics.get("left_eye_subject_side") or "left")
+                    or (eye_metrics.get("right_eye_subject_side") or "right")
+                )
+            elif skin_like_eye_feature_cover and abs(left_eye_stats.get("mean_y", 0.0) -
+                                                    right_eye_stats.get("mean_y", 0.0)) > 28.0:
                 eye_metrics["reason"] = "single_eye_skin_hand_cover"
                 eye_metrics["occluded_eye_side"] = (
                     left_eye_stats.get("mean_y", 0.0) < right_eye_stats.get("mean_y", 0.0)
@@ -2724,6 +2943,71 @@ def analyze_face_blur(frame, box, pose=None):
         sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
         tenengrad = float(np.mean(sobel_x * sobel_x + sobel_y * sobel_y))
         face_w = x2 - x1
+
+        # Fixed-size inner-face metrics reduce site/face-width dependence. The
+        # crop avoids hair/background and measures the same scale for every site.
+        normalized_lap = 999.0
+        normalized_tenengrad = 99999.0
+        normalized_edge_density = 1.0
+        normalized_std_y = 0.0
+        normalized_hard_blur = False
+        vertical_smear_strength = 0.0
+        vertical_smear_width_ratio = 0.0
+        vertical_smear_edge_density = 1.0
+        try:
+            fh, fw_face = face.shape[:2]
+            ix1 = int(fw_face * 0.12)
+            ix2 = int(fw_face * 0.88)
+            iy1 = int(fh * 0.18)
+            iy2 = int(fh * 0.82)
+            inner_face = face[iy1:iy2, ix1:ix2]
+            if inner_face.size > 0:
+                norm_gray = cv2.cvtColor(
+                    cv2.resize(inner_face, (224, 224), interpolation=cv2.INTER_AREA),
+                    cv2.COLOR_BGR2GRAY,
+                )
+                normalized_lap = float(cv2.Laplacian(norm_gray, cv2.CV_64F).var())
+                norm_sobel_x = cv2.Sobel(norm_gray, cv2.CV_64F, 1, 0, ksize=3)
+                norm_sobel_y = cv2.Sobel(norm_gray, cv2.CV_64F, 0, 1, ksize=3)
+                normalized_tenengrad = float(np.mean(norm_sobel_x * norm_sobel_x + norm_sobel_y * norm_sobel_y))
+                normalized_edge_density = float(np.mean(cv2.Canny(norm_gray, 45, 110) > 0))
+                normalized_std_y = float(norm_gray.std())
+                normalized_hard_blur = (
+                    normalized_lap < 12.0 and
+                    normalized_tenengrad < 550.0 and
+                    normalized_edge_density < 0.008
+                )
+                smear_region = norm_gray[int(224 * 0.10):int(224 * 0.88), :]
+                if smear_region.size > 0:
+                    col_mean = np.mean(smear_region, axis=0).astype(np.float32)
+                    kernel = np.ones(13, dtype=np.float32) / 13.0
+                    col_smooth = np.convolve(col_mean, kernel, mode="same")
+                    baseline = float(np.median(col_smooth))
+                    spread = float(np.std(col_smooth))
+                    threshold = baseline + max(7.0, spread * 0.75)
+                    bright_cols = col_smooth > threshold
+                    if np.any(bright_cols):
+                        runs = []
+                        start = None
+                        for idx, is_bright in enumerate(bright_cols):
+                            if is_bright and start is None:
+                                start = idx
+                            elif not is_bright and start is not None:
+                                runs.append((start, idx))
+                                start = None
+                        if start is not None:
+                            runs.append((start, len(bright_cols)))
+                        run = max(runs, key=lambda item: item[1] - item[0])
+                        run_w = max(1, run[1] - run[0])
+                        vertical_smear_width_ratio = float(run_w / len(bright_cols))
+                        vertical_smear_strength = float(np.max(col_smooth) - baseline)
+                        streak = smear_region[:, run[0]:run[1]]
+                        if streak.size > 0:
+                            vertical_smear_edge_density = float(
+                                np.mean(cv2.Canny(streak, 45, 110) > 0))
+        except Exception:
+            normalized_hard_blur = False
+
         pose_yaw = 0.0
         try:
             if pose is not None and len(pose) >= 2:
@@ -2811,6 +3095,25 @@ def analyze_face_blur(frame, box, pose=None):
                 bright_ratio < 0.02 and
                 very_bright_ratio < 0.005
             )
+        )
+        large_borderline_soft_blur = (
+            face_w >= 600 and
+            bright_ratio > 0.25 and
+            lap < 8.0 and
+            tenengrad < 450.0 and
+            normalized_lap < 12.0 and
+            normalized_tenengrad < 650.0 and
+            normalized_edge_density < 0.010
+        )
+        normalized_low_texture_blur = (
+            normalized_lap < 13.0 and
+            normalized_tenengrad < 820.0 and
+            normalized_edge_density < 0.018
+        )
+        normalized_motion_blur = (
+            normalized_lap < 14.0 and
+            normalized_tenengrad < 500.0 and
+            normalized_edge_density < 0.006
         )
         medium_face_low_texture_blur = (
             400 <= face_w < 430 and
@@ -2946,14 +3249,44 @@ def analyze_face_blur(frame, box, pose=None):
             0.07 <= bright_ratio < 0.18 and
             very_bright_ratio < 0.08
         )
+        wet_lens_low_detail_occlusion = (
+            face_w >= 540 and
+            pose_yaw < 18.0 and
+            lap < 26.0 and
+            tenengrad < 850.0 and
+            normalized_edge_density < 0.020 and
+            rain_eye_lap < 9.5 and
+            rain_eye_ten < 260.0
+        )
+        wet_lens_vertical_smear_occlusion = (
+            face_w >= 430 and
+            pose_yaw < 18.0 and
+            (feature_low_texture_quality_risk or wet_lens_low_texture_quality_risk) and
+            lap < 36.0 and
+            tenengrad < 1150.0 and
+            rain_eye_lap < 12.0 and
+            rain_eye_ten < 520.0 and
+            0.035 <= vertical_smear_width_ratio <= 0.22 and
+            vertical_smear_strength >= 10.0 and
+            vertical_smear_edge_density < 0.040
+        )
+        face_detail_occlusion = wet_lens_low_detail_occlusion
 
         return {
-            "is_blur": bool(severe_low_texture_blur or mid_low_texture_blur or low_light_small_face_blur or low_light_tiny_face_blur or bright_tiny_face_low_texture_blur or bright_small_face_low_texture_blur or frontal_bright_low_texture_blur or bright_low_texture_blur or visible_low_texture_blur or medium_face_low_texture_blur or glare_smear_blur or blur_small_face_glare or side_motion_blur or medium_dark_soft_blur or large_motion_smear_blur or large_low_detail_blur or large_soft_motion_blur or large_frontal_low_texture_blur or huge_face_low_texture_blur or dark_low_texture_blur or rain_droplet_blur),
+            "is_blur": bool(normalized_hard_blur or normalized_low_texture_blur or normalized_motion_blur or large_borderline_soft_blur or severe_low_texture_blur or mid_low_texture_blur or low_light_small_face_blur or low_light_tiny_face_blur or bright_tiny_face_low_texture_blur or bright_small_face_low_texture_blur or frontal_bright_low_texture_blur or bright_low_texture_blur or visible_low_texture_blur or medium_face_low_texture_blur or glare_smear_blur or blur_small_face_glare or side_motion_blur or medium_dark_soft_blur or large_motion_smear_blur or large_low_detail_blur or large_soft_motion_blur or large_frontal_low_texture_blur or huge_face_low_texture_blur or dark_low_texture_blur or rain_droplet_blur),
             "laplacian": lap,
             "tenengrad": tenengrad,
+            "normalized_laplacian": normalized_lap,
+            "normalized_tenengrad": normalized_tenengrad,
+            "normalized_edge_density": normalized_edge_density,
+            "normalized_std_y": normalized_std_y,
             "pose_yaw_abs": pose_yaw,
             "background_bright_ratio": bright_ratio,
             "background_very_bright_ratio": very_bright_ratio,
+            "normalized_hard_blur": bool(normalized_hard_blur),
+            "normalized_low_texture_blur": bool(normalized_low_texture_blur),
+            "normalized_motion_blur": bool(normalized_motion_blur),
+            "large_borderline_soft_blur": bool(large_borderline_soft_blur),
             "blur_mid_face": bool(severe_low_texture_blur or glare_smear_blur),
             "severe_low_texture_blur": bool(severe_low_texture_blur),
             "mid_low_texture_blur": bool(mid_low_texture_blur),
@@ -2975,11 +3308,17 @@ def analyze_face_blur(frame, box, pose=None):
             "large_frontal_low_texture_blur": bool(large_frontal_low_texture_blur),
             "huge_face_low_texture_blur": bool(huge_face_low_texture_blur),
             "rain_droplet_blur": bool(rain_droplet_blur),
+            "face_detail_occlusion": bool(face_detail_occlusion),
+            "wet_lens_low_detail_occlusion": bool(wet_lens_low_detail_occlusion),
+            "wet_lens_vertical_smear_occlusion": bool(wet_lens_vertical_smear_occlusion),
             "feature_low_texture_quality_risk": bool(feature_low_texture_quality_risk),
             "wet_lens_low_texture_quality_risk": bool(wet_lens_low_texture_quality_risk),
             "rain_eye_laplacian": rain_eye_lap,
             "rain_eye_tenengrad": rain_eye_ten,
             "rain_blob_count": rain_blob_count,
+            "vertical_smear_strength": vertical_smear_strength,
+            "vertical_smear_width_ratio": vertical_smear_width_ratio,
+            "vertical_smear_edge_density": vertical_smear_edge_density,
         }
     except Exception as e:
         LOGGER.error(f"Face blur analysis failed: {e}")

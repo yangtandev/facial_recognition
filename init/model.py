@@ -58,7 +58,7 @@ CAMERA = {0: "inCamera", 1: "outCamera"}
 CAM_NAME_MAP = {0: "入口", 1: "出口"}
 POTENTIAL_MISS_RATIO = 0.8
 Z_SCORE_THRESHOLD = 1.5
-QUALITY_RULE_VERSION = "2026-06-10.1"
+QUALITY_RULE_VERSION = "2026-06-15.3"
 
 test_img = cv2.imread(os.path.join(
     os.path.dirname(__file__), "../other/test_img.jpg"))
@@ -1058,9 +1058,10 @@ class Comparison:
         """
         try:
             json_path = os.path.splitext(image_path)[0] + ".json"
+            saved_at = datetime.now(self.TIMEZONE)
 
             data = {
-                "timestamp": datetime.now(self.TIMEZONE).isoformat(),
+                "timestamp": saved_at.isoformat(),
                 "reason": msg,
                 "metrics": metrics
             }
@@ -1068,11 +1069,23 @@ class Comparison:
                 data["frame_id"] = packet_meta.get("frame_id")
                 data["frame_captured_at"] = packet_meta.get("captured_at")
                 data["frame_shape"] = packet_meta.get("shape")
+                try:
+                    captured_at = datetime.fromisoformat(
+                        str(packet_meta.get("captured_at")))
+                    data["capture_to_save_ms"] = int(
+                        (saved_at - captured_at).total_seconds() * 1000)
+                except Exception:
+                    data["capture_to_save_ms"] = None
             if frame is not None:
-                data["decision_frame_hash"] = frame_hash(frame)
+                digest = frame_hash(frame)
+                data["decision_frame_hash"] = digest
                 data["lossless_frame_file"] = os.path.basename(image_path)
-                data["lossless_frame_hash"] = frame_hash(frame)
+                data["lossless_frame_hash"] = digest
                 data["lossless_frame_format"] = "png"
+                data["frame_sync"] = {
+                    "decision_equals_lossless": True,
+                    "source": "same_copied_frame",
+                }
             if box is not None:
                 data["face_box"] = [int(v) for v in box]
 
@@ -1129,7 +1142,7 @@ class Comparison:
             "臉部遮擋" in quality_msg
         ):
             return "請完整露出臉部", "請完整露出臉部", "hint_face_visible"
-        if "影像模糊" in quality_msg:
+        if "影像模糊" in quality_msg or "臉部變形" in quality_msg or "臉部細節遮擋" in quality_msg:
             return "無法識別", "無法識別", "hint_unrecognized"
         if "斜視" in quality_msg or "未正視" in quality_msg or "側臉" in quality_msg:
             return "請正視鏡頭", "請正視鏡頭", "hint_look_straight"
@@ -1436,7 +1449,9 @@ class Comparison:
                     frame_to_use, box, pose=pose_for_blur)
                 metrics['face_blur'] = blur_metrics
                 if blur_metrics.get("is_blur", False):
-                    return 0.0, "影像模糊 (BlurFace)", metrics
+                    blur_priority = 62 if blur_metrics.get(
+                        "normalized_motion_blur", False) else 42
+                    defer_quality_reject(blur_priority, "影像模糊 (BlurFace)")
 
                 head_cover_shadow_metrics = analyze_head_cover_shadow(
                     frame_to_use, mesh_points=mesh_points, points=points, box=box)
@@ -1668,6 +1683,14 @@ class Comparison:
                 v_ratio < 0.55 and
                 current_ear > 0.24
             )
+            medium_low_v_side_face_reject = (
+                470 <= face_w < 540 and
+                16.0 < abs(yaw) < 23.5 and
+                abs(roll) < 6.0 and
+                v_ratio < 0.62 and
+                current_ear > 0.24 and
+                metrics.get('face_blur', {}).get("normalized_motion_blur", False)
+            )
             metrics['large_side_face_turn_reject'] = bool(
                 large_side_face_turn_reject)
             metrics['medium_side_face_turn_reject'] = bool(
@@ -1676,9 +1699,12 @@ class Comparison:
                 strict_large_side_face_turn_reject)
             metrics['large_low_v_side_face_reject'] = bool(
                 large_low_v_side_face_reject)
-            if large_side_face_turn_reject or strict_large_side_face_turn_reject or large_low_v_side_face_reject:
+            metrics['medium_low_v_side_face_reject'] = bool(
+                medium_low_v_side_face_reject)
+            if large_side_face_turn_reject or strict_large_side_face_turn_reject or large_low_v_side_face_reject or medium_low_v_side_face_reject:
+                side_face_priority = 64 if medium_low_v_side_face_reject else 60
                 defer_quality_reject(
-                    60, f"未正視鏡頭 (SideFaceGeometryV2 Yaw:{yaw:.1f}, V:{v_ratio:.2f})")
+                    side_face_priority, f"未正視鏡頭 (SideFaceGeometryV2 Yaw:{yaw:.1f}, V:{v_ratio:.2f})")
             if medium_side_face_turn_reject:
                 defer_quality_reject(
                     60, f"未正視鏡頭 (SideFaceGeometryV2 Yaw:{yaw:.1f}, V:{v_ratio:.2f})")
@@ -1696,10 +1722,21 @@ class Comparison:
         #   避免誤殺：11;20;43 陳志杰 (EAR=0.12, v_ratio 正常~0.8+) 不受影響
         if current_ear < 0.11:
             defer_quality_reject(
-                45, f"眼睛閉合 (EAR: {current_ear:.4f} < 0.11)")
+                70, f"眼睛閉合 (EAR: {current_ear:.4f} < 0.11)")
         if current_ear < 0.15 and v_ratio < 0.60:
             defer_quality_reject(
-                45, f"眼睛閉合+低頭 (EAR: {current_ear:.4f} < 0.15 & V-Ratio: {v_ratio:.2f} < 0.60)")
+                70, f"眼睛閉合+低頭 (EAR: {current_ear:.4f} < 0.15 & V-Ratio: {v_ratio:.2f} < 0.60)")
+        soft_closed_eye = (
+            current_ear < 0.14 and
+            v_ratio < 0.68 and
+            face_w >= 430 and
+            abs(metrics.get('yaw', 0.0)) < 12.0 and
+            abs(metrics.get('roll_angle', 0.0)) < 8.0
+        )
+        metrics['soft_closed_eye'] = bool(soft_closed_eye)
+        if soft_closed_eye:
+            defer_quality_reject(
+                70, f"眼睛閉合 (SoftEAR: {current_ear:.4f})")
 
         face_blur_metrics = metrics.get('face_blur', {})
         motion_unstable_for_occlusion = (
@@ -1713,18 +1750,78 @@ class Comparison:
         if motion_unstable_for_occlusion:
             return 0.0, "影像模糊 (MotionBlur)", metrics
 
+        if face_blur_metrics.get("is_blur", False):
+            return 0.0, "影像模糊 (BlurFace)", metrics
+        if face_blur_metrics.get("face_detail_occlusion", False):
+            return 0.0, "臉部細節遮擋 (FaceDetailOcclusion)", metrics
+
+        pose_reject_pending = any(
+            any(token in msg for token in ("抬頭", "低頭", "未正視", "姿態不良"))
+            for _, msg in deferred_quality_rejects
+        )
+        metrics['pose_reject_pending'] = bool(pose_reject_pending)
+
         # ---------------------------------------------------------
         # 3.3 臉部特徵遮擋檢查
         # ---------------------------------------------------------
         # 放在模糊與姿態之後，避免轉頭/低頭/模糊造成的 landmark 失真
         # 被誤命名成眼睛、鼻子或口鼻遮擋。
-        if face_w > 100 and frame_to_use is not None:
+        if face_w > 100 and frame_to_use is not None and pose_reject_pending:
+            pre_pose_occlusion_metrics = analyze_face_occlusion(
+                frame_to_use, mesh_points=mesh_points, points=points, box=box,
+                gaze_status=gaze_status)
+            metrics['face_occlusion'] = pre_pose_occlusion_metrics
+            metrics['eye_occlusion'] = pre_pose_occlusion_metrics.get(
+                "eye_occlusion", {})
+            eye_reason = str(metrics['eye_occlusion'].get("reason", ""))
+            if pre_pose_occlusion_metrics.get("face_deformation", False):
+                return 0.0, "臉部變形 (FaceDeformation)", metrics
+            high_conf_pre_pose_eye_occlusion = (
+                pre_pose_occlusion_metrics.get("face_occluded", False) and
+                eye_reason in {
+                    "large_side_skin_eye_hand_cover",
+                    "large_center_skin_eye_hand_cover",
+                    "single_eye_skin_hand_cover",
+                    "both_eye_skin_hand_cover",
+                    "left_eye_side_angle_skin_cover",
+                    "right_eye_side_angle_skin_cover",
+                    "left_eye_bright_skin_cover",
+                    "right_eye_bright_skin_cover",
+                }
+            )
+            pre_pose_occlusion_reason = str(
+                pre_pose_occlusion_metrics.get("reason", ""))
+            high_conf_pre_pose_lower_occlusion = (
+                pre_pose_occlusion_metrics.get("face_occluded", False) and
+                pre_pose_occlusion_reason in {
+                    "skin_colored_nose_mouth_hand_cover",
+                    "skin_colored_palm_nose_mouth_cover",
+                    "skin_colored_palm_nose_mouth_tip_cover",
+                    "skin_colored_palm_mouth_cover",
+                    "skin_colored_palm_mouth_cover_lower_box",
+                    "skin_colored_mouth_cover",
+                    "skin_colored_lower_cover",
+                }
+            )
+            metrics['high_conf_pre_pose_eye_occlusion'] = bool(
+                high_conf_pre_pose_eye_occlusion)
+            metrics['high_conf_pre_pose_lower_occlusion'] = bool(
+                high_conf_pre_pose_lower_occlusion)
+            if high_conf_pre_pose_eye_occlusion or high_conf_pre_pose_lower_occlusion:
+                face_occlusion_detail = describe_face_occlusion(
+                    pre_pose_occlusion_metrics)
+                metrics['face_occlusion_detail'] = face_occlusion_detail
+                return 0.0, face_occlusion_detail["quality_msg"], metrics
+
+        if face_w > 100 and frame_to_use is not None and not pose_reject_pending:
             face_occlusion_metrics = analyze_face_occlusion(
                 frame_to_use, mesh_points=mesh_points, points=points, box=box,
                 gaze_status=gaze_status)
             metrics['face_occlusion'] = face_occlusion_metrics
             metrics['eye_occlusion'] = face_occlusion_metrics.get(
                 "eye_occlusion", {})
+            if face_occlusion_metrics.get("face_deformation", False):
+                return 0.0, "臉部變形 (FaceDeformation)", metrics
             if face_occlusion_metrics.get("face_occluded", False):
                 face_occlusion_detail = describe_face_occlusion(
                     face_occlusion_metrics)
@@ -1736,6 +1833,25 @@ class Comparison:
                 "left_eye", {})
             right_eye_metrics = metrics.get('eye_occlusion', {}).get(
                 "right_eye", {})
+            nose_metrics = face_occlusion_metrics.get("nose_region", {})
+            mouth_metrics = face_occlusion_metrics.get("mouth_region", {})
+            face_region_metrics = face_occlusion_metrics.get("face_region", {})
+            central_dark_strap_occlusion = (
+                face_w >= 430 and
+                abs(metrics.get('pitch', 0.0)) < 12.0 and
+                abs(metrics.get('yaw', 0.0)) < 16.0 and
+                abs(metrics.get('roll_angle', 0.0)) < 8.0 and
+                0.70 < metrics.get('v_ratio', 1.0) < 1.25 and
+                nose_metrics.get("dark_ratio", 0.0) > 0.42 and
+                nose_metrics.get("skin_ratio", 1.0) < 0.82 and
+                mouth_metrics.get("skin_ratio", 1.0) < 0.86 and
+                eye_band_metrics.get("skin_ratio", 0.0) > 0.80 and
+                nose_metrics.get("mean_y", 255.0) < face_region_metrics.get("mean_y", 0.0) - 12.0
+            )
+            metrics['central_dark_strap_occlusion'] = bool(
+                central_dark_strap_occlusion)
+            if central_dark_strap_occlusion:
+                return 0.0, "臉部遮擋 (FaceOcclusion)", metrics
             visual_eye_skin_occlusion = (
                 current_ear < 0.155 and
                 430 <= face_w < 500 and
@@ -1752,6 +1868,26 @@ class Comparison:
             if visual_eye_skin_occlusion:
                 metrics['visual_eye_skin_occlusion'] = True
                 return 0.0, "眼部遮擋 (EyeOcclusionBoth)", metrics
+            side_hand_closed_eye_occlusion = (
+                face_w >= 540 and
+                current_ear < 0.13 and
+                abs(metrics.get('pitch', 0.0)) <= 8.0 and
+                abs(metrics.get('yaw', 0.0)) <= 14.0 and
+                abs(metrics.get('roll_angle', 0.0)) <= 10.0 and
+                face_occlusion_metrics.get("near_face_skin_side_adjacent", False) and
+                face_occlusion_metrics.get("near_face_dark_side_adjacent", False) and
+                0.08 <= face_occlusion_metrics.get(
+                    "near_face_skin_component_ratio", 0.0) <= 0.28 and
+                eye_band_metrics.get("skin_ratio", 0.0) > 0.90 and
+                eye_band_metrics.get("dark_ratio", 1.0) < 0.15 and
+                eye_band_metrics.get("edge_density", 1.0) < 0.020 and
+                face_occlusion_metrics.get("lower_box_region", {}).get(
+                    "dark_ratio", 0.0) > 0.28
+            )
+            metrics['side_hand_closed_eye_occlusion'] = bool(
+                side_hand_closed_eye_occlusion)
+            if side_hand_closed_eye_occlusion:
+                return 0.0, "臉部遮擋 (FaceOcclusion)", metrics
             front_face_hand_occlusion = (
                 -20.0 < metrics.get('pitch', 0.0) < -15.0 and
                 abs(metrics.get('yaw', 0.0)) < 12.0 and
@@ -1978,7 +2114,9 @@ class Comparison:
                 continue
 
             # 取得畫面尺寸 (用於置中與邊界檢查)
-            frame_curr = _frame
+            frame_curr = _frame.copy()
+            _frame = frame_curr
+            self.system.state.frame_mtcnn[self.frame_num] = frame_curr
             frame_h, frame_w, _ = frame_curr.shape
 
             camera_name = CAM_NAME_MAP.get(
@@ -2318,6 +2456,11 @@ class Comparison:
                             (430 <= face_width < 500 and confidence < 0.75 and gap < 0.08 and z_score < 2.0) or
                             (face_width > 500 and confidence < 0.80 and gap < 0.08 and z_score < 1.8)
                         )
+                        face_detail_occlusion_weak_separation = (
+                            low_texture_ambiguous and
+                            feature_low_texture_quality_risk and
+                            face_width >= 540
+                        )
                         eye_closed_ambiguous = (
                             quality_metrics.get('ear', 1.0) < 0.15 and
                             confidence < 0.75 and
@@ -2403,6 +2546,8 @@ class Comparison:
                                 motion_blur_weak_separation)
                             quality_metrics['feature_low_texture_quality_risk'] = bool(
                                 feature_low_texture_quality_risk)
+                            quality_metrics['face_detail_occlusion_weak_separation'] = bool(
+                                face_detail_occlusion_weak_separation)
                             quality_metrics['regional_low_texture_quality_risk'] = bool(
                                 regional_low_texture_quality_risk)
 
@@ -2424,6 +2569,8 @@ class Comparison:
                                 quality_metrics['quality_reject_reason'] = "quality_影像模糊_(MotionBlurWeakSeparation)"
                             elif mid_texture_ambiguous:
                                 quality_metrics['quality_reject_reason'] = "quality_影像模糊_(BlurFace)"
+                            elif face_detail_occlusion_weak_separation:
+                                quality_metrics['quality_reject_reason'] = "quality_臉部細節遮擋_(FaceDetailOcclusion)"
                             elif low_texture_ambiguous:
                                 quality_metrics['quality_reject_reason'] = "quality_影像模糊_(LowTextureWeakSeparation)"
                             elif side_face_ambiguous:
