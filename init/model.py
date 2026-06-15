@@ -1415,9 +1415,11 @@ class Comparison:
             deferred_quality_rejects.append((int(priority), str(msg)))
 
         if offset > limit_offset:
-            return 0.0, f"未置中 (偏離 {offset:.1f}px > 容許 {limit_offset:.1f}px)", metrics
+            defer_quality_reject(
+                10, f"未置中 (偏離 {offset:.1f}px > 容許 {limit_offset:.1f}px)")
         if offset_y > limit_offset_y:
-            return 0.0, f"未置中 (垂直偏離 {offset_y:.1f}px > 容許 {limit_offset_y:.1f}px)", metrics
+            defer_quality_reject(
+                10, f"未置中 (垂直偏離 {offset_y:.1f}px > 容許 {limit_offset_y:.1f}px)")
 
         # ---------------------------------------------------------
         # 2. 特徵點完整性檢查 (Visibility) - 完整性需求
@@ -1548,8 +1550,12 @@ class Comparison:
                 is_extreme_pose = abs(yaw) > 30 or abs(
                     pitch) > 25 or abs(roll) > 25
                 if is_extreme_pose:
-                    defer_quality_reject(
-                        65, f"姿態不良 (Yaw:{yaw:.1f}° Pitch:{pitch:.1f}° Roll:{roll:.1f}°)")
+                    if pitch <= -25.0 and abs(yaw) <= 18.0 and abs(roll) <= 18.0:
+                        defer_quality_reject(
+                            66, f"低頭 (Pitch:{pitch:.1f}° V-Ratio:{metrics.get('v_ratio', 0.0):.2f})")
+                    else:
+                        defer_quality_reject(
+                            65, f"姿態不良 (Yaw:{yaw:.1f}° Pitch:{pitch:.1f}° Roll:{roll:.1f}°)")
             else:
                 # [2026-01-11 Fix] 若無 Gaze 狀態 (可能因 Race Condition 被清空)，嚴格禁止放行
                 return 0.0, "Gaze Status Missing", metrics
@@ -1625,6 +1631,21 @@ class Comparison:
                     defer_quality_reject(
                         58, f"低頭/遮眼 (V {v_ratio:.2f}<0.42 & EAR {current_ear:.2f}<0.22)")
 
+            low_head_eye_visibility_reject = (
+                face_w >= 430 and
+                0.42 <= v_ratio < 0.62 and
+                current_ear < 0.20 and
+                metrics.get('pitch', 0.0) <= -4.0 and
+                abs(metrics.get('yaw', 0.0)) <= 18.0 and
+                abs(metrics.get('roll_angle', 0.0)) <= 15.0
+            )
+            metrics['low_head_eye_visibility_reject'] = bool(
+                low_head_eye_visibility_reject)
+            if low_head_eye_visibility_reject:
+                metrics['pitch_check'] = 'Fail (Low Head Eye Visibility)'
+                defer_quality_reject(
+                    58, f"低頭 (V-Ratio:{v_ratio:.2f}, EAR:{current_ear:.2f})")
+
             low_head_pose_hard_reject = (
                 metrics.get('pitch', 0.0) <= -14.5 and
                 v_ratio < 0.65 and
@@ -1635,7 +1656,8 @@ class Comparison:
                 low_head_pose_hard_reject)
             if low_head_pose_hard_reject:
                 metrics['pitch_check'] = 'Fail (Pitch Low Head)'
-                return 0.0, f"低頭 (Pitch:{metrics.get('pitch', 0.0):.1f}, V-Ratio:{v_ratio:.2f})", metrics
+                defer_quality_reject(
+                    58, f"低頭 (Pitch:{metrics.get('pitch', 0.0):.1f}, V-Ratio:{v_ratio:.2f})")
 
             # [2026-05-04 Fix v2] 抬頭/眼睛超出畫面上限過濾
             # 根因：當人抬頭或仰頭使眼睛離開畫面時，v_ratio 會異常升高。
@@ -1740,16 +1762,20 @@ class Comparison:
         # 層 2：0.10 ≤ EAR < 0.15 且 v_ratio < 0.60 → 閉眼+低頭 combo
         #   根因：13;27;24 (EAR=0.139, v=0.44) 需被攔截
         #   避免誤殺：11;20;43 陳志杰 (EAR=0.12, v_ratio 正常~0.8+) 不受影響
-        if current_ear < 0.11:
+        extreme_low_head_for_eye_check = metrics.get('v_ratio', 1.0) < 0.35
+        metrics['extreme_low_head_for_eye_check'] = bool(
+            extreme_low_head_for_eye_check)
+        if current_ear < 0.11 and not extreme_low_head_for_eye_check:
             defer_quality_reject(
                 70, f"眼睛閉合 (EAR: {current_ear:.4f} < 0.11)")
-        if current_ear < 0.15 and v_ratio < 0.60:
+        if current_ear < 0.15 and v_ratio < 0.60 and not extreme_low_head_for_eye_check:
             defer_quality_reject(
                 70, f"眼睛閉合+低頭 (EAR: {current_ear:.4f} < 0.15 & V-Ratio: {v_ratio:.2f} < 0.60)")
         soft_closed_eye = (
             current_ear < 0.14 and
             v_ratio < 0.68 and
             face_w >= 430 and
+            not extreme_low_head_for_eye_check and
             abs(metrics.get('yaw', 0.0)) < 12.0 and
             abs(metrics.get('roll_angle', 0.0)) < 8.0
         )
@@ -1764,7 +1790,9 @@ class Comparison:
             80 <= face_blur_metrics.get('laplacian', 999.0) < 125 and
             face_blur_metrics.get('tenengrad', 99999.0) < 2200 and
             abs(metrics.get('yaw', 0.0)) > 15.0 and
-            abs(metrics.get('roll_angle', 0.0)) > 14.0
+            abs(metrics.get('roll_angle', 0.0)) > 14.0 and
+            metrics.get('v_ratio', 1.0) >= 0.42 and
+            metrics.get('pitch', 0.0) > -20.0
         )
         metrics['motion_unstable_for_occlusion'] = bool(motion_unstable_for_occlusion)
         if motion_unstable_for_occlusion:
@@ -1794,8 +1822,6 @@ class Comparison:
             metrics['eye_occlusion'] = pre_pose_occlusion_metrics.get(
                 "eye_occlusion", {})
             eye_reason = str(metrics['eye_occlusion'].get("reason", ""))
-            if pre_pose_occlusion_metrics.get("face_deformation", False):
-                return 0.0, "臉部變形 (FaceDeformation)", metrics
             high_conf_pre_pose_eye_occlusion = (
                 pre_pose_occlusion_metrics.get("face_occluded", False) and
                 eye_reason in {
@@ -1807,6 +1833,7 @@ class Comparison:
                     "right_eye_side_angle_skin_cover",
                     "left_eye_bright_skin_cover",
                     "right_eye_bright_skin_cover",
+                    "skin_feature_occlusion_over_deformation",
                 }
             )
             pre_pose_occlusion_reason = str(
@@ -1833,6 +1860,8 @@ class Comparison:
                     pre_pose_occlusion_metrics)
                 metrics['face_occlusion_detail'] = face_occlusion_detail
                 return 0.0, face_occlusion_detail["quality_msg"], metrics
+            if pre_pose_occlusion_metrics.get("face_deformation", False):
+                return 0.0, "臉部變形 (FaceDeformation)", metrics
 
         if face_w > 100 and frame_to_use is not None and not pose_reject_pending:
             face_occlusion_metrics = analyze_face_occlusion(
@@ -1841,6 +1870,15 @@ class Comparison:
             metrics['face_occlusion'] = face_occlusion_metrics
             metrics['eye_occlusion'] = face_occlusion_metrics.get(
                 "eye_occlusion", {})
+            if (
+                face_occlusion_metrics.get("face_occluded", False) and
+                str(face_occlusion_metrics.get("reason", "")) ==
+                "skin_feature_occlusion_over_deformation"
+            ):
+                face_occlusion_detail = describe_face_occlusion(
+                    face_occlusion_metrics)
+                metrics['face_occlusion_detail'] = face_occlusion_detail
+                return 0.0, face_occlusion_detail["quality_msg"], metrics
             if face_occlusion_metrics.get("face_deformation", False):
                 return 0.0, "臉部變形 (FaceDeformation)", metrics
             if face_occlusion_metrics.get("face_occluded", False):
@@ -2456,23 +2494,23 @@ class Comparison:
                                 )
                             )
                         )
-                        direct_low_texture_quality_reject = (
+                        direct_low_texture_recognition_reject = (
                             feature_low_texture_quality_risk
                         )
-                        if direct_low_texture_quality_reject:
-                            quality_metrics['direct_low_texture_quality_reject'] = True
+                        if direct_low_texture_recognition_reject:
+                            quality_metrics['direct_low_texture_recognition_reject'] = True
                             quality_metrics['regional_low_texture_quality_risk'] = bool(
                                 regional_low_texture_quality_risk)
                             quality_metrics['feature_low_texture_quality_risk'] = bool(
                                 feature_low_texture_quality_risk)
-                            quality_metrics['quality_reject_reason'] = "quality_影像模糊_(BlurFace)"
+                            quality_metrics['recognition_reject_reason'] = "recognition_低紋理辨識風險_(LowTextureRecognitionRisk)"
                             LOGGER.info(
-                                f"[{camera_name}][畫質過濾] 影像模糊 DirectLowTexture - 拒絕辨識")
+                                f"[{camera_name}][辨識過濾] 低紋理辨識風險 DirectLowTexture - 拒絕辨識")
                             if face_width >= min_face_threshold and now - self.last_potential_miss_log_time > 1.0:
                                 try:
                                     snapshot = _frame
                                     if snapshot is not None:
-                                        reason_str = quality_metrics['quality_reject_reason']
+                                        reason_str = quality_metrics['recognition_reject_reason']
                                         saved_path = self._save_potential_miss_image(
                                             snapshot, face_width, min_face_threshold, camera_name, reason=reason_str)
                                         if saved_path:
@@ -2484,7 +2522,7 @@ class Comparison:
                                     pass
 
                             self._show_unrecognized_hint(
-                                now, camera_name, "BlurFace",
+                                now, camera_name, "LowTextureRecognitionRisk",
                                 confidence, z_score, gap)
                             continue
                         mid_texture_ambiguous = (
@@ -2544,14 +2582,14 @@ class Comparison:
                         )
                         if motion_blur_quality_reject:
                             quality_metrics['motion_blur_quality_reject'] = True
-                            quality_metrics['quality_reject_reason'] = "quality_影像模糊_(MotionBlurQuality)"
+                            quality_metrics['recognition_reject_reason'] = "recognition_動態模糊辨識風險_(MotionBlurQuality)"
                             LOGGER.info(
-                                f"[{camera_name}][畫質過濾] 影像模糊 MotionBlurQuality - 拒絕辨識")
+                                f"[{camera_name}][辨識過濾] 動態模糊辨識風險 MotionBlurQuality - 拒絕辨識")
                             if face_width >= min_face_threshold and now - self.last_potential_miss_log_time > 1.0:
                                 try:
                                     snapshot = _frame
                                     if snapshot is not None:
-                                        reason_str = quality_metrics['quality_reject_reason']
+                                        reason_str = quality_metrics['recognition_reject_reason']
                                         saved_path = self._save_potential_miss_image(
                                             snapshot, face_width, min_face_threshold, camera_name, reason=reason_str)
                                         if saved_path:
@@ -2614,19 +2652,19 @@ class Comparison:
                             LOGGER.info(
                                 f"[{camera_name}][Gap過濾] 分數過於接近 (Gap: {gap:.4f} < {gap_threshold}) - 拒絕辨識")
                             if eye_closed_ambiguous:
-                                quality_metrics['quality_reject_reason'] = "quality_眼睛閉合_(AmbiguousEAR)"
+                                quality_metrics['recognition_reject_reason'] = "recognition_眼睛閉合辨識風險_(AmbiguousEAR)"
                             elif top_edge_ambiguous:
-                                quality_metrics['quality_reject_reason'] = "quality_影像模糊_(TopEdgeAmbiguous)"
+                                quality_metrics['recognition_reject_reason'] = "recognition_頂部邊界辨識風險_(TopEdgeAmbiguous)"
                             elif motion_blur_weak_separation:
-                                quality_metrics['quality_reject_reason'] = "quality_影像模糊_(MotionBlurWeakSeparation)"
+                                quality_metrics['recognition_reject_reason'] = "recognition_動態模糊辨識風險_(MotionBlurWeakSeparation)"
                             elif mid_texture_ambiguous:
-                                quality_metrics['quality_reject_reason'] = "quality_影像模糊_(BlurFace)"
+                                quality_metrics['recognition_reject_reason'] = "recognition_低紋理辨識風險_(BlurFace)"
                             elif face_detail_occlusion_weak_separation:
-                                quality_metrics['quality_reject_reason'] = "quality_臉部細節遮擋_(FaceDetailOcclusion)"
+                                quality_metrics['recognition_reject_reason'] = "recognition_臉部細節辨識風險_(FaceDetailOcclusion)"
                             elif low_texture_ambiguous:
-                                quality_metrics['quality_reject_reason'] = "quality_影像模糊_(LowTextureWeakSeparation)"
+                                quality_metrics['recognition_reject_reason'] = "recognition_低紋理辨識風險_(LowTextureWeakSeparation)"
                             elif side_face_ambiguous:
-                                quality_metrics['quality_reject_reason'] = "quality_未正視鏡頭_(SideFaceAmbiguous)"
+                                quality_metrics['recognition_reject_reason'] = "recognition_未正視辨識風險_(SideFaceAmbiguous)"
 
                             # [2026-01-30 Feature] 潛在失敗數據收集 (Gap Fail)
                             if face_width >= min_face_threshold and now - self.last_potential_miss_log_time > 1.0:
@@ -2634,7 +2672,7 @@ class Comparison:
                                     snapshot = _frame
                                     if snapshot is not None:
                                         reason_str = quality_metrics.get(
-                                            'quality_reject_reason') or f"Gap_Fail_{gap:.4f}"
+                                            'recognition_reject_reason') or f"Gap_Fail_{gap:.4f}"
                                         saved_path = self._save_potential_miss_image(
                                             snapshot, face_width, min_face_threshold, camera_name, reason=reason_str)
                                         if saved_path:

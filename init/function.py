@@ -2184,8 +2184,37 @@ def analyze_face_occlusion(frame, mesh_points=None, points=None, box=None, gaze_
                 nose_stats["laplacian"] < 40.0
             )
         )
+        broad_feature_visibility_loss = (
+            face_box_w >= 430.0 and
+            not severe_face_underexposed and
+            nose_stats.get("valid", False) and
+            lower_box_stats["valid"] and
+            -16.0 <= gaze["pitch"] <= 10.0 and
+            abs(gaze["yaw"]) <= 18.5 and
+            abs(gaze["roll"]) <= 15.0 and
+            0.42 <= local_v_ratio <= 1.08 and
+            lower_feature_missing_score >= 6 and
+            not mouth_nose_clearly_visible and
+            not high_head_visible_lower_face and
+            not high_head_closed_eye_visible_lower_face and
+            not hood_visible_nose_mouth and
+            (
+                near_face_skin_component_ratio >= 0.28 or
+                (
+                    skin_component["side_adjacent"] and
+                    skin_component["vertical_overlap_ratio"] > 0.58 and
+                    skin_component["height_ratio"] > 0.48
+                )
+            ) and
+            (
+                mouth_stats["edge_density"] < 0.024 or
+                mouth_stats["laplacian"] < 22.0 or
+                nose_stats["edge_density"] < 0.050 or
+                lower_box_stats["edge_density"] < 0.032
+            )
+        )
         skin_like_lower_feature_loss = (
-            lower_feature_detail_loss and
+            (lower_feature_detail_loss or broad_feature_visibility_loss) and
             not high_head_visible_lower_face and
             not high_head_closed_eye_visible_lower_face and
             not hood_visible_nose_mouth and
@@ -2386,6 +2415,8 @@ def analyze_face_occlusion(frame, mesh_points=None, points=None, box=None, gaze_
             skin_like_lower_feature_loss)
         result["lower_feature_detail_loss"] = bool(
             lower_feature_detail_loss)
+        result["broad_feature_visibility_loss"] = bool(
+            broad_feature_visibility_loss)
         result["lower_feature_foreground_evidence"] = bool(
             lower_feature_foreground_evidence)
         result["lower_feature_missing_score"] = int(
@@ -2394,6 +2425,29 @@ def analyze_face_occlusion(frame, mesh_points=None, points=None, box=None, gaze_
             large_side_skin_eye_hand_cover)
         result["large_center_skin_eye_hand_cover"] = bool(
             large_center_skin_eye_hand_cover)
+
+        foreground_feature_occlusion_over_deformation = (
+            face_deformation and
+            generic_lower_resolution_ok and
+            not severe_face_underexposed and
+            (
+                near_face_skin_component_ratio >= 0.24 or
+                broad_feature_visibility_loss
+            ) and
+            eye_band_stats.get("skin_ratio", 0.0) > 0.90 and
+            abs(gaze["yaw"]) <= 18.0 and
+            abs(gaze["roll"]) <= 15.0
+        )
+        result["foreground_feature_occlusion_over_deformation"] = bool(
+            foreground_feature_occlusion_over_deformation)
+        if foreground_feature_occlusion_over_deformation:
+            eye_metrics["eye_occluded"] = True
+            eye_metrics["reason"] = "skin_feature_occlusion_over_deformation"
+            eye_metrics["occluded_eye_side"] = "both"
+            result["eye_occlusion"] = eye_metrics
+            result["face_occluded"] = True
+            result["reason"] = eye_metrics["reason"]
+            return result
 
         if face_deformation:
             result["reason"] = "face_deformation"
@@ -3289,7 +3343,7 @@ def analyze_face_blur(frame, box, pose=None):
         normalized_detail_soft_blur = (
             face_w >= 400 and
             pose_yaw < 14.0 and
-            28.0 <= lap < 52.0 and
+            28.0 <= lap < 30.0 and
             normalized_lap < 36.0 and
             normalized_tenengrad < 3200.0 and
             normalized_edge_density < 0.048 and
@@ -3417,8 +3471,38 @@ def analyze_face_blur(frame, box, pose=None):
         )
         face_detail_occlusion = wet_lens_low_detail_occlusion
 
+        hard_blur_reject = (
+            normalized_hard_blur or
+            normalized_low_texture_blur or
+            normalized_motion_blur or
+            large_borderline_soft_blur or
+            severe_low_texture_blur or
+            mid_low_texture_blur or
+            low_light_small_face_blur or
+            low_light_tiny_face_blur or
+            bright_tiny_face_low_texture_blur or
+            bright_small_face_low_texture_blur or
+            frontal_bright_low_texture_blur or
+            bright_low_texture_blur or
+            visible_low_texture_blur or
+            medium_face_low_texture_blur or
+            glare_smear_blur or
+            blur_small_face_glare or
+            side_motion_blur or
+            medium_dark_soft_blur or
+            medium_vertical_motion_blur or
+            large_motion_smear_blur or
+            large_low_detail_blur or
+            large_soft_motion_blur or
+            large_frontal_low_texture_blur or
+            normalized_detail_blur_reject or
+            huge_face_low_texture_blur or
+            dark_low_texture_blur or
+            rain_droplet_blur
+        )
+
         return {
-            "is_blur": bool(normalized_hard_blur or normalized_low_texture_blur or normalized_motion_blur or large_borderline_soft_blur or severe_low_texture_blur or mid_low_texture_blur or low_light_small_face_blur or low_light_tiny_face_blur or bright_tiny_face_low_texture_blur or bright_small_face_low_texture_blur or frontal_bright_low_texture_blur or bright_low_texture_blur or visible_low_texture_blur or medium_face_low_texture_blur or glare_smear_blur or blur_small_face_glare or side_motion_blur or medium_dark_soft_blur or medium_vertical_motion_blur or large_motion_smear_blur or large_low_detail_blur or large_soft_motion_blur or large_frontal_low_texture_blur or normalized_detail_blur_reject or huge_face_low_texture_blur or dark_low_texture_blur or rain_droplet_blur or feature_low_texture_quality_risk or wet_lens_low_texture_quality_risk),
+            "is_blur": bool(hard_blur_reject),
             "laplacian": lap,
             "tenengrad": tenengrad,
             "normalized_laplacian": normalized_lap,
