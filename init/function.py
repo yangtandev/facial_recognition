@@ -1204,23 +1204,7 @@ def analyze_eye_occlusion(frame, mesh_points=None, box=None, gaze_status=None):
         right_single_eye_skin_cover = _single_eye_skin_cover(right_stats, left_stats)
 
         def _side_angle_single_eye_skin_cover(eye_stats, other_stats):
-            return (
-                abs(gaze["yaw"]) < 18.0 and
-                face_box_w >= 430.0 and
-                eye_dist > 240.0 and
-                face_stats["skin_ratio"] > 0.84 and
-                face_stats["specular_ratio"] < 0.010 and
-                face_stats["edge_density"] < 0.035 and
-                band_stats["skin_ratio"] > 0.84 and
-                band_stats["edge_density"] < 0.032 and
-                band_stats["specular_ratio"] < 0.003 and
-                other_stats["skin_ratio"] > 0.88 and
-                eye_stats["skin_ratio"] > 0.80 and
-                eye_stats["mean_y"] < other_stats["mean_y"] - 9.0 and
-                eye_stats["dark_ratio"] > max(0.15, other_stats["dark_ratio"] + 0.08) and
-                eye_stats["very_dark_ratio"] > other_stats["very_dark_ratio"] + 0.025 and
-                eye_stats["specular_ratio"] < 0.003
-            )
+            return False
 
         left_side_angle_eye_skin_cover = (
             not left_single_eye_skin_cover and
@@ -2197,7 +2181,7 @@ def analyze_face_occlusion(frame, mesh_points=None, points=None, box=None, gaze_
         )
         lower_feature_detail_loss = (
             normal_frontal_detail_context and
-            lower_feature_missing_score >= 7 and
+            lower_feature_missing_score >= (9 if face_mean < 105.0 else 7) and
             lower_feature_foreground_evidence and
             (
                 near_face_skin_component_ratio >= 0.18 or
@@ -2217,7 +2201,7 @@ def analyze_face_occlusion(frame, mesh_points=None, points=None, box=None, gaze_
             abs(gaze["yaw"]) <= 18.5 and
             abs(gaze["roll"]) <= 15.0 and
             0.42 <= local_v_ratio <= 1.08 and
-            lower_feature_missing_score >= 6 and
+            lower_feature_missing_score >= (8 if face_mean < 105.0 else 6) and
             not mouth_nose_clearly_visible and
             not high_head_visible_lower_face and
             not high_head_closed_eye_visible_lower_face and
@@ -3156,10 +3140,16 @@ def analyze_face_blur(frame, box, pose=None):
                 normalized_tenengrad = float(np.mean(norm_sobel_x * norm_sobel_x + norm_sobel_y * norm_sobel_y))
                 normalized_edge_density = float(np.mean(cv2.Canny(norm_gray, 45, 110) > 0))
                 normalized_std_y = float(norm_gray.std())
+                normalized_mean_y = float(norm_gray.mean())
+                
+                # [2026-06-16 Fix] Relax blur threshold in low light to tolerate denoising
+                lap_thresh = 8.0 if normalized_mean_y < 105.0 else 12.0
+                edge_thresh = 0.004 if normalized_mean_y < 105.0 else 0.008
+                
                 normalized_hard_blur = (
-                    normalized_lap < 12.0 and
+                    normalized_lap < lap_thresh and
                     normalized_tenengrad < 550.0 and
-                    normalized_edge_density < 0.008
+                    normalized_edge_density < edge_thresh
                 )
                 smear_region = norm_gray[int(224 * 0.10):int(224 * 0.88), :]
                 if smear_region.size > 0:
@@ -3348,7 +3338,8 @@ def analyze_face_blur(frame, box, pose=None):
             25 <= lap < 35 and
             1100 < tenengrad < 1800 and
             bright_ratio < 0.10 and
-            very_bright_ratio < 0.06
+            very_bright_ratio < 0.06 and
+            float(gray.mean()) >= 105.0 # [2026-06-16 Fix] Do not trigger low detail blur in dark/denoised images
         )
         large_soft_motion_blur = (
             490 <= face_w < 540 and
