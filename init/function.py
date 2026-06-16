@@ -1382,11 +1382,35 @@ def analyze_eye_occlusion(frame, mesh_points=None, box=None, gaze_status=None):
         return result
 
 
-def analyze_face_occlusion(frame, mesh_points=None, points=None, box=None, gaze_status=None):
+def analyze_face_occlusion(frame, mesh_points=None, points=None, box=None, gaze_status=None, hand_boxes=None):
     """
     Detect meaningful facial-feature occlusion. Clear eyeglasses pass; opaque eye
     covers and lower-face cloth/masks reject.
     """
+    if hand_boxes and box is not None:
+        hx1, hy1, hx2, hy2 = box
+        face_area = max(1, (hx2 - hx1) * (hy2 - hy1))
+        
+        for hand in hand_boxes:
+            hx, hy, hxw, hyh = hand
+            # Calculate intersection
+            ix1 = max(hx1, hx)
+            iy1 = max(hy1, hy)
+            ix2 = min(hx2, hxw)
+            iy2 = min(hy2, hyh)
+            
+            if ix1 < ix2 and iy1 < iy2:
+                intersection = (ix2 - ix1) * (iy2 - iy1)
+                iof = intersection / face_area
+                if iof > 0.10:
+                    return {
+                        "enabled": True,
+                        "eye_occlusion": {},
+                        "lower_face_occluded": True,
+                        "face_occluded": True,
+                        "reason": "hand_block",
+                    }
+                    
     eye_metrics = analyze_eye_occlusion(
         frame, mesh_points=mesh_points, box=box, gaze_status=gaze_status)
     result = {

@@ -1808,10 +1808,18 @@ class Comparison:
         # ---------------------------------------------------------
         # 放在模糊與姿態之後，避免轉頭/低頭/模糊造成的 landmark 失真
         # 被誤命名成眼睛、鼻子或口鼻遮擋。
+        
+        hand_boxes = []
+        if face_w > 100 and frame_to_use is not None:
+            # system is FaceRecognitionSystem, mp_handler is stored per frame_num
+            mp_handler = self.system.mp_detectors.get(self.frame_num)
+            if mp_handler:
+                hand_boxes = mp_handler.detect_hands(frame_to_use)
+
         if face_w > 100 and frame_to_use is not None and pose_reject_pending:
             pre_pose_occlusion_metrics = analyze_face_occlusion(
                 frame_to_use, mesh_points=mesh_points, points=points, box=box,
-                gaze_status=gaze_status)
+                gaze_status=gaze_status, hand_boxes=hand_boxes)
             metrics['face_occlusion'] = pre_pose_occlusion_metrics
             metrics['eye_occlusion'] = pre_pose_occlusion_metrics.get(
                 "eye_occlusion", {})
@@ -1860,7 +1868,7 @@ class Comparison:
         if face_w > 100 and frame_to_use is not None and not pose_reject_pending:
             face_occlusion_metrics = analyze_face_occlusion(
                 frame_to_use, mesh_points=mesh_points, points=points, box=box,
-                gaze_status=gaze_status)
+                gaze_status=gaze_status, hand_boxes=hand_boxes)
             metrics['face_occlusion'] = face_occlusion_metrics
             metrics['eye_occlusion'] = face_occlusion_metrics.get(
                 "eye_occlusion", {})

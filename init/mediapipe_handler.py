@@ -37,6 +37,14 @@ class MediaPipeHandler:
             min_detection_confidence=0.5
         )
         
+        # [2026-06-16 Feature] Hand Detection for Occlusion
+        self.mp_hands = mp_solutions.hands
+        self.hands_detector = self.mp_hands.Hands(
+            static_image_mode=True,
+            max_num_hands=2,
+            min_detection_confidence=0.5
+        )
+        
         # 關鍵點 Index 定義
         self.IDX_LEFT_EYE_IRIS = 468
         self.IDX_RIGHT_EYE_IRIS = 473
@@ -62,6 +70,31 @@ class MediaPipeHandler:
         if hasattr(self, 'pose_detector') and self.pose_detector:
             self.pose_detector.close()
             self.pose_detector = None
+        if hasattr(self, 'hands_detector') and self.hands_detector:
+            self.hands_detector.close()
+            self.hands_detector = None
+
+    def detect_hands(self, image):
+        """
+        [2026-06-16 Feature] 偵測畫面中的手部並回傳 Bounding Boxes
+        :param image: BGR image
+        :return: list of [x_min, y_min, x_max, y_max] bounding boxes
+        """
+        if not hasattr(self, 'hands_detector') or not self.hands_detector:
+            return []
+            
+        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        results = self.hands_detector.process(rgb_image)
+        
+        boxes = []
+        if results.multi_hand_landmarks:
+            h, w = image.shape[:2]
+            for hand_landmarks in results.multi_hand_landmarks:
+                coords = np.array([(lm.x * w, lm.y * h) for lm in hand_landmarks.landmark])
+                x_min, y_min = np.min(coords, axis=0)
+                x_max, y_max = np.max(coords, axis=0)
+                boxes.append([int(x_min), int(y_min), int(x_max), int(y_max)])
+        return boxes
 
     def detect_pose(self, image):
         """
