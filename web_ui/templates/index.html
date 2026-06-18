@@ -278,7 +278,13 @@
 							/>啟用排程</label
 						>
 					</div>
+					<div class="form-group">
+						<label><input type="radio" name="Schedule.mode" value="schedule" />依時間排程</label>
+						<label><input type="radio" name="Schedule.mode" value="always_in" />僅作為入口</label>
+						<label><input type="radio" name="Schedule.mode" value="always_out" />僅作為出口</label>
+					</div>
 					<button
+						id="addPeriodBtn"
 						type="button"
 						class="btn"
 						style="
@@ -293,8 +299,8 @@
 					<table id="schedTable">
 						<thead>
 							<tr>
-								<th>開始 (HH:MM)</th>
-								<th>結束 (HH:MM)</th>
+								<th>開始 (HH:MM:SS)</th>
+								<th>結束 (HH:MM:SS)</th>
 								<th>操作</th>
 							</tr>
 						</thead>
@@ -467,26 +473,46 @@
 				const sched = currentConfig.Schedule || {};
 				document.querySelector('[name="Schedule.enabled"]').checked =
 					sched.enabled || false;
+				const mode = sched.mode || 'schedule';
+				const modeInput =
+					document.querySelector(`[name="Schedule.mode"][value="${mode}"]`) ||
+					document.querySelector('[name="Schedule.mode"][value="schedule"]');
+				modeInput.checked = true;
 				const periods = sched.in_periods || [];
 				const tbody = document.querySelector('#schedTable tbody');
 				tbody.innerHTML = '';
 				periods.forEach((p) => addPeriodRow(p.start, p.end));
+				updateScheduleMode();
 			}
 
 			function addPeriod() {
-				addPeriodRow('06:00', '12:00');
+				addPeriodRow('06:00:00', '12:00:00');
+				updateScheduleMode();
 			}
 
 			function addPeriodRow(start, end) {
 				const tbody = document.querySelector('#schedTable tbody');
 				const tr = document.createElement('tr');
 				tr.innerHTML = `
-            <td><input type="time" class="p-start" value="${start}"></td>
-            <td><input type="time" class="p-end" value="${end}"></td>
+            <td><input type="time" class="p-start" step="1" value="${start}"></td>
+            <td><input type="time" class="p-end" step="1" value="${end}"></td>
             <td><button type="button" class="btn-del" onclick="this.closest('tr').remove()">刪除</button></td>
         `;
 				tbody.appendChild(tr);
 			}
+
+			function updateScheduleMode() {
+				const mode = document.querySelector('[name="Schedule.mode"]:checked')?.value || 'schedule';
+				const disabled = mode !== 'schedule';
+				document.querySelectorAll('#schedTable input, #schedTable button').forEach((el) => {
+					el.disabled = disabled;
+				});
+				document.getElementById('addPeriodBtn').disabled = disabled;
+			}
+
+			document.querySelectorAll('[name="Schedule.mode"]').forEach((el) => {
+				el.addEventListener('change', updateScheduleMode);
+			});
 
 			document
 				.getElementById('configForm')
@@ -516,6 +542,9 @@
 					newConfig.Schedule.enabled = document.querySelector(
 						'[name="Schedule.enabled"]',
 					).checked;
+					newConfig.Schedule.mode =
+						document.querySelector('[name="Schedule.mode"]:checked')?.value ||
+						'schedule';
 					const periods = [];
 					document
 						.querySelectorAll('#schedTable tbody tr')

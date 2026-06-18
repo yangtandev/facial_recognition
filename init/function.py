@@ -115,6 +115,44 @@ def remove_old_files(directory, n=2000, m=100):
     else:
         print("No need to delete files.")
 
+
+def _parse_schedule_time(value):
+    value = str(value or "00:00")
+    if value.count(":") == 1:
+        value += ":00"
+    return datetime.datetime.strptime(value, "%H:%M:%S").time()
+
+
+def is_schedule_entry_active(schedule_conf, now_time=None):
+    """Return True for entry mode, False for exit mode, or None when disabled."""
+    if not schedule_conf.get("enabled", False):
+        return None
+
+    mode = schedule_conf.get("mode", "schedule")
+    if mode == "always_in":
+        return True
+    if mode == "always_out":
+        return False
+
+    now_time = now_time or datetime.datetime.now().time()
+    periods = schedule_conf.get("in_periods", [])
+    if not periods and "in_start" in schedule_conf:
+        periods = [{
+            "start": schedule_conf.get("in_start", "06:00"),
+            "end": schedule_conf.get("in_end", "17:00"),
+        }]
+
+    for period in periods:
+        start_time = _parse_schedule_time(period.get("start", "00:00"))
+        end_time = _parse_schedule_time(period.get("end", "00:00"))
+        if start_time <= end_time:
+            if start_time <= now_time <= end_time:
+                return True
+        elif start_time <= now_time or now_time <= end_time:
+            return True
+    return False
+
+
 def check_in_out(system, staff_name, staff_id, camera_num, n, confidence):
     """
     根據攝影機與時間控制簽到/簽離邏輯，並執行 API 上傳與語音播放。
@@ -149,41 +187,9 @@ def check_in_out(system, staff_name, staff_id, camera_num, n, confidence):
     schedule_conf = CONFIG.get("Schedule", {})
     schedule_active = False
     
-    if schedule_conf.get("enabled", False) and n:
+    if schedule_conf.get("enabled", False):
         try:
-            # Use local time
-            now_dt = datetime.datetime.now()
-            now_time = now_dt.time()
-            
-            is_in_period = False
-            
-            # Support multiple periods (Prioritize new list format)
-            periods = schedule_conf.get("in_periods", [])
-            if not periods:
-                # Fallback to legacy single period
-                start_str = schedule_conf.get("in_start", "06:00")
-                end_str = schedule_conf.get("in_end", "17:00")
-                periods = [{"start": start_str, "end": end_str}]
-            
-            for period in periods:
-                start_str = period.get("start", "00:00")
-                end_str = period.get("end", "00:00")
-                
-                start_time = datetime.datetime.strptime(start_str, "%H:%M").time()
-                end_time = datetime.datetime.strptime(end_str, "%H:%M").time()
-                
-                # Check if current time is within this period
-                if start_time <= end_time:
-                    if start_time <= now_time <= end_time:
-                        is_in_period = True
-                        break
-                else:
-                    # Cross-midnight case
-                    if start_time <= now_time or now_time <= end_time:
-                        is_in_period = True
-                        break
-                
-            if is_in_period:
+            if is_schedule_entry_active(schedule_conf):
                 is_check_in_action = True
             else:
                 is_check_out_action = True
@@ -191,8 +197,6 @@ def check_in_out(system, staff_name, staff_id, camera_num, n, confidence):
             schedule_active = True
         except Exception as e:
             LOGGER.error(f"Schedule Logic Error: {e}")
-    elif schedule_conf.get("enabled", False):
-        LOGGER.debug(f"Schedule ignored in dual-camera mode for camera_num={camera_num}")
 
     if not schedule_active:
         if n:  # 單鏡頭模式：根據狀態自動判斷
@@ -300,30 +304,13 @@ def check_in_out_qrcode(system, verification, staff_id, camera_num):
     schedule_conf = CONFIG.get("Schedule", {})
     is_scheduled_mode = False
     
-    if schedule_conf.get("enabled", False) and is_single_cam:
+    if schedule_conf.get("enabled", False):
         try:
-            now_time = datetime.datetime.now().time()
-            periods = schedule_conf.get("in_periods", [])
-            if not periods:
-                start_str = schedule_conf.get("in_start", "06:00")
-                end_str = schedule_conf.get("in_end", "17:00")
-                periods = [{"start": start_str, "end": end_str}]
-            
-            is_in_period = False
-            for period in periods:
-                start_time = datetime.datetime.strptime(period.get("start", "00:00"), "%H:%M").time()
-                end_time = datetime.datetime.strptime(period.get("end", "00:00"), "%H:%M").time()
-                if start_time <= end_time:
-                    if start_time <= now_time <= end_time: is_in_period = True; break
-                else:
-                    if start_time <= now_time or now_time <= end_time: is_in_period = True; break
-            
-            if is_in_period: direction = "enter"
+            if is_schedule_entry_active(schedule_conf): direction = "enter"
             else: direction = "exit"
             is_scheduled_mode = True
-        except: pass
-    elif schedule_conf.get("enabled", False):
-        LOGGER.debug(f"Schedule ignored in dual-camera QR mode for camera_num={camera_num}")
+        except Exception as e:
+            LOGGER.error(f"Schedule QR Logic Error: {e}")
     
     # 2. 自動切換 / 鏡頭判斷
     if not is_scheduled_mode:

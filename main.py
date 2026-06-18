@@ -131,48 +131,22 @@ class CameraSystem:
     def _is_entry_active(self):
         """
         判斷當前鏡頭是否處於「入口」模式。
-        - 雙鏡頭模式：frame_num == 0 為入口。
-        - 單鏡頭模式：需檢查排程。若排程啟用且在入口時段，則為入口；否則為出口。
+        - 排程啟用：所有鏡頭依同一排程切換方向。
+        - 排程未啟用：雙鏡頭 frame_num == 0 為入口；單鏡頭預設入口。
         """
-        # 1. 雙鏡頭模式 (n_camera 為 False，代表有兩個鏡頭實例)
-        # 注意: self.n_camera 在 __init__ 中定義為 n < 2，這變數命名有點反直覺
-        # n < 2 (True) -> 單鏡頭
-        # n >= 2 (False) -> 雙鏡頭
+        schedule_conf = CONFIG.get("Schedule", {})
+        if schedule_conf.get("enabled", False):
+            try:
+                result = is_schedule_entry_active(schedule_conf)
+                return True if result is None else result
+            except Exception as e:
+                LOGGER.error(f"Schedule display logic error: {e}")
+                return True
+
         if not self.n_camera:
             return self.frame_num == 0
 
-        # 2. 單鏡頭模式 (self.n_camera == True)
-        schedule_conf = CONFIG.get("Schedule", {})
-        if not schedule_conf.get("enabled", False):
-            # 若無排程，單鏡頭預設為入口 (或者根據 check_time 狀態自動切換，但衣著檢查通常只在入口)
-            # 根據 function.py 的邏輯，如果沒排程，單鏡頭是自動切換。
-            # 但為了安全起見，衣著檢查應從嚴：預設檢查 (視為入口)，除非明確知道是出口。
-            return True
-
-        # 3. 檢查排程
-        try:
-            now_time = datetime.datetime.now().time()
-            periods = schedule_conf.get("in_periods", [])
-            if not periods:
-                start_str = schedule_conf.get("in_start", "06:00")
-                end_str = schedule_conf.get("in_end", "17:00")
-                periods = [{"start": start_str, "end": end_str}]
-
-            for period in periods:
-                start_time = datetime.datetime.strptime(
-                    period.get("start", "00:00"), "%H:%M").time()
-                end_time = datetime.datetime.strptime(
-                    period.get("end", "00:00"), "%H:%M").time()
-                if start_time <= end_time:
-                    if start_time <= now_time <= end_time:
-                        return True
-                else:
-                    if start_time <= now_time or now_time <= end_time:
-                        return True
-
-            return False  # 不在入口時段 -> 出口
-        except:
-            return True  # 發生錯誤，從嚴認定
+        return True
 
     def main_camera(self):
         frame_count = 0
@@ -1334,19 +1308,25 @@ class FaceRecognitionSystem:
     def _reload_configuration(self):
         """Reload configuration and restart camera systems."""
         LOGGER.info("Reloading configuration and restarting subsystems...")
+        app = QApplication.instance()
+        old_quit_on_last_window = app.quitOnLastWindowClosed() if app else True
+        if app:
+            app.setQuitOnLastWindowClosed(False)
 
         # 1. Terminate existing cameras
         if hasattr(self, 'cameras'):
             for cam in self.cameras:
-                # We need a clean way to close the window and stop threads
-                # cam.win.close() triggers terminate via closeEvent, but let's be explicit
                 try:
-                    cam.win.close()  # This triggers cam.terminate
+                    if hasattr(cam, 'win'):
+                        cam.win.close()  # This triggers cam.terminate
+                    QApplication.processEvents()
+                    if not getattr(cam, 'stop_threads', False):
+                        class _ReloadCloseEvent:
+                            def accept(self): pass
+                        cam.terminate(_ReloadCloseEvent())
                 except Exception as e:
                     LOGGER.error(f"Error closing camera window: {e}")
 
-            # Wait a bit for threads to die?
-            # Or just clear the list. CameraSystem.terminate sets stop_threads=True.
             self.cameras = []
 
         # 2. Reload Config
@@ -1417,6 +1397,8 @@ class FaceRecognitionSystem:
 
         except Exception as e:
             LOGGER.error(f"Failed to reload config.json: {e}")
+            if app:
+                app.setQuitOnLastWindowClosed(old_quit_on_last_window)
             return
 
         # 3. Re-setup cameras with new config
@@ -1426,6 +1408,9 @@ class FaceRecognitionSystem:
             LOGGER.info("Cameras re-initialized.")
         except Exception as e:
             LOGGER.error(f"Failed to setup cameras: {e}")
+        finally:
+            if app:
+                app.setQuitOnLastWindowClosed(old_quit_on_last_window)
 
     def update_inout_log(self):
         """Refresh today's in/out state once.

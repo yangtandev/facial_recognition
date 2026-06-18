@@ -7,7 +7,8 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTabWidget, QLabel,
     QLineEdit, QPushButton, QCheckBox, QFormLayout,
     QMessageBox, QTableWidget, QTableWidgetItem, QHeaderView,
-    QScrollArea, QGroupBox, QSpinBox, QDoubleSpinBox, QApplication, QComboBox
+    QScrollArea, QGroupBox, QSpinBox, QDoubleSpinBox, QApplication, QComboBox,
+    QRadioButton, QButtonGroup
 )
 from PyQt5.QtCore import Qt, QSize
 from PyQt5.QtGui import QFont, QIcon
@@ -220,7 +221,7 @@ class ConfigWindow(QWidget):
 
         # 說明
         info = QLabel(
-            "說明：當啟用排程時，單一攝影機將依據下列時段強制切換為「入口 (In)」模式。\n不在列表中的時段將預設為「出口 (Out)」。")
+            "說明：啟用後，所有啟用攝影機依模式同向作為入口或出口。\n依時間排程時，列表內時段為入口 (In)，列表外為出口 (Out)。")
         info.setStyleSheet("color: gray;")
         layout.addWidget(info)
 
@@ -228,11 +229,27 @@ class ConfigWindow(QWidget):
         self.chk_schedule_enable = QCheckBox("啟用排程控制 (Enable Schedule)")
         layout.addWidget(self.chk_schedule_enable)
 
+        mode_box = QHBoxLayout()
+        self.schedule_mode_group = QButtonGroup(self)
+        self.radio_schedule = QRadioButton("依時間排程")
+        self.radio_always_in = QRadioButton("僅作為入口")
+        self.radio_always_out = QRadioButton("僅作為出口")
+        self.schedule_mode_group.addButton(self.radio_schedule)
+        self.schedule_mode_group.addButton(self.radio_always_in)
+        self.schedule_mode_group.addButton(self.radio_always_out)
+        self.radio_schedule.setChecked(True)
+        mode_box.addWidget(self.radio_schedule)
+        mode_box.addWidget(self.radio_always_in)
+        mode_box.addWidget(self.radio_always_out)
+        layout.addLayout(mode_box)
+        for radio in (self.radio_schedule, self.radio_always_in, self.radio_always_out):
+            radio.toggled.connect(self.update_schedule_mode)
+
         # 列表
         self.table_schedule = QTableWidget()
         self.table_schedule.setColumnCount(2)
         self.table_schedule.setHorizontalHeaderLabels(
-            ["開始時間 (Start)", "結束時間 (End)"])
+            ["開始時間 (HH:MM:SS)", "結束時間 (HH:MM:SS)"])
         self.table_schedule.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         layout.addWidget(self.table_schedule)
 
@@ -247,16 +264,23 @@ class ConfigWindow(QWidget):
         btn_box.addWidget(self.btn_del_period)
         layout.addLayout(btn_box)
 
-    def add_period_row(self, start="06:00", end="12:00"):
+    def add_period_row(self, start="06:00:00", end="12:00:00"):
         row = self.table_schedule.rowCount()
         self.table_schedule.insertRow(row)
         self.table_schedule.setItem(row, 0, QTableWidgetItem(start))
         self.table_schedule.setItem(row, 1, QTableWidgetItem(end))
+        self.update_schedule_mode()
 
     def del_period_row(self):
         row = self.table_schedule.currentRow()
         if row >= 0:
             self.table_schedule.removeRow(row)
+
+    def update_schedule_mode(self):
+        enabled = self.radio_schedule.isChecked()
+        self.table_schedule.setEnabled(enabled)
+        self.btn_add_period.setEnabled(enabled)
+        self.btn_del_period.setEnabled(enabled)
 
     def init_tab_voice(self):
         layout = QVBoxLayout()
@@ -364,6 +388,13 @@ class ConfigWindow(QWidget):
             # Tab 4: Schedule (Multi-period)
             sched = cfg.get("Schedule", {})
             self.chk_schedule_enable.setChecked(sched.get("enabled", False))
+            mode = sched.get("mode", "schedule")
+            if mode == "always_in":
+                self.radio_always_in.setChecked(True)
+            elif mode == "always_out":
+                self.radio_always_out.setChecked(True)
+            else:
+                self.radio_schedule.setChecked(True)
 
             self.table_schedule.setRowCount(0)
             periods = sched.get("in_periods", [])
@@ -375,6 +406,7 @@ class ConfigWindow(QWidget):
             for p in periods:
                 self.add_period_row(p.get("start", "00:00"),
                                     p.get("end", "00:00"))
+            self.update_schedule_mode()
 
             # Tab 5: Voice
             say = cfg.get("say", {})
@@ -449,6 +481,12 @@ class ConfigWindow(QWidget):
             if "Schedule" not in cfg:
                 cfg["Schedule"] = {}
             cfg["Schedule"]["enabled"] = self.chk_schedule_enable.isChecked()
+            if self.radio_always_in.isChecked():
+                cfg["Schedule"]["mode"] = "always_in"
+            elif self.radio_always_out.isChecked():
+                cfg["Schedule"]["mode"] = "always_out"
+            else:
+                cfg["Schedule"]["mode"] = "schedule"
 
             periods = []
             for r in range(self.table_schedule.rowCount()):

@@ -136,8 +136,8 @@ class VideoCapture:
             # Add the appropriate hardware acceleration arguments if VAAPI is detected
             if self.hw_accel_method == 'vaapi':
                 command.extend(['-hwaccel', 'vaapi'])
-        else: # Software HEVC decoding
-            command.extend(['-c:v', 'hevc']) # Explicitly use software HEVC decoder
+        # Software decode: let FFmpeg select the codec from the stream.
+        # Some test/USB RTSP sources publish H264 while production cameras can be HEVC.
             
         command.extend([
             '-i', self.rtsp_url,

@@ -24,6 +24,7 @@ from init.function import (
     file_tree_stat_hash,
     git_head_commit,
     stable_json_hash,
+    is_schedule_entry_active,
     check_in_out_qrcode,
     check_in_out,
 )
@@ -117,42 +118,23 @@ class Detector:
         [2026-02-06 Fix] 判斷當前是否為入口模式 (複製自 main.py 邏輯，供 Detector 使用)
         解決單鏡頭模式下，出口時段誤執行衣著偵測與阻斷的問題。
         """
-        # 1. 判斷是否為單鏡頭
+        schedule_conf = CONFIG.get("Schedule", {})
+        if schedule_conf.get("enabled", False):
+            try:
+                result = is_schedule_entry_active(schedule_conf)
+                return True if result is None else result
+            except Exception as e:
+                LOGGER.error(f"Schedule detector logic error: {e}")
+                return True
+
         ips = [CONFIG["cameraIP"]["in_camera"],
                CONFIG["cameraIP"]["out_camera"]]
         is_single_cam = (ips[0] == ips[1])
 
-        # 雙鏡頭模式：看 frame_num
         if not is_single_cam:
             return self.frame_num == 0
 
-        # 單鏡頭模式：看排程
-        schedule_conf = CONFIG.get("Schedule", {})
-        if not schedule_conf.get("enabled", False):
-            return True  # 無排程預設為入口 (從嚴)
-
-        try:
-            now_time = datetime.now().time()
-            periods = schedule_conf.get("in_periods", [])
-            if not periods:
-                start_str = schedule_conf.get("in_start", "06:00")
-                end_str = schedule_conf.get("in_end", "17:00")
-                periods = [{"start": start_str, "end": end_str}]
-
-            for period in periods:
-                start_time = datetime.strptime(
-                    period.get("start", "00:00"), "%H:%M").time()
-                end_time = datetime.strptime(
-                    period.get("end", "00:00"), "%H:%M").time()
-                if start_time <= end_time:
-                    if start_time <= now_time <= end_time:
-                        return True
-                else:
-                    if start_time <= now_time or now_time <= end_time:
-                        return True
-            return False
-        except:
-            return True
+        return True
 
     def face_detector(self):
         last_box = None
