@@ -622,12 +622,14 @@ def generate_rolling_summary(report_dir):
     except Exception as e:
         print(f"Error writing rolling summary: {e}")
 
-def cleanup_old_files(report_dir, days_to_keep=7):
+def cleanup_old_files(report_dir, days_to_keep=7, today=None):
     """
     Deletes report files and image directories older than a specified number of days.
     """
+    today = today or date.today()
+    days_to_keep = max(1, int(days_to_keep))
     print(f"Starting cleanup process (keeping last {days_to_keep} days)...")
-    cutoff_date = date.today() - timedelta(days=days_to_keep)
+    cutoff_date = today - timedelta(days=days_to_keep - 1)
 
     # 1. Cleanup Report Files
     if os.path.isdir(report_dir):
@@ -679,6 +681,10 @@ def cleanup_old_files(report_dir, days_to_keep=7):
 def main():
     """Main function to orchestrate the report generation."""
     print("Starting hourly recognition performance analysis...")
+
+    report_dir = os.path.join(os.path.dirname(__file__), "reports")
+    os.makedirs(report_dir, exist_ok=True)
+    cleanup_old_files(report_dir, days_to_keep=7)
     
     config = load_config()
     if not config:
@@ -714,9 +720,6 @@ def main():
     overall_stats, per_person_stats = calculate_statistics(recognition_events, staff_id_to_name, valid_staff_ids)
     perf_stats = calculate_performance_statistics(performance_events)
     
-    report_dir = os.path.join(os.path.dirname(__file__), "reports")
-    os.makedirs(report_dir, exist_ok=True)
-    
     # 1. Write (overwrite) text report for the current run
     text_report_path = os.path.join(report_dir, f"report-{target_date.strftime('%Y-%m-%d')}.txt")
     write_text_report(overall_stats, per_person_stats, perf_stats, width_stats, potential_miss_count, network_stats, text_report_path, min_face_settings)
@@ -728,9 +731,6 @@ def main():
     # 3. Regenerate the 7-day rolling summary
     generate_rolling_summary(report_dir)
 
-    # 4. Cleanup old files
-    cleanup_old_files(report_dir, days_to_keep=7)
-    
     print("\nAnalysis complete.")
 
 
