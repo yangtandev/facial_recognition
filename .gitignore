@@ -45,6 +45,7 @@ skills-lock.json
 
 # --- Testing ---
 tests/
+tests/*
 
 # --- Training ---
 train/
