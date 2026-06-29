@@ -179,7 +179,8 @@ class MainWindow(QWidget, Ui_Form):
         img_rect = self.img1.geometry()
         hint_rect = self.hint2.geometry()
         bottom_gap = hint_rect.top() - (img_rect.top() + img_rect.height())
-        label_h = hint_rect.height()
+        available_h = img_rect.top() - bottom_gap
+        label_h = min(hint_rect.height(), available_h)
         label_y = img_rect.top() - bottom_gap - label_h
         if label_h < 20 or label_y < 0:
             self.version_label.hide()
