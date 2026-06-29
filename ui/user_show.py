@@ -8,6 +8,28 @@ from PyQt5.QtWidgets import QApplication, QPushButton, QInputDialog, QLineEdit, 
 from PyQt5 import QtCore
 import os, json, time, subprocess, sys
 
+def get_app_version():
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    release_note = os.path.join(root, "release_note.md")
+    try:
+        with open(release_note, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("## v"):
+                    return line.split()[1]
+    except Exception:
+        pass
+    try:
+        return subprocess.check_output(
+            ["git", "describe", "--tags", "--always"],
+            cwd=root,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except Exception:
+        return "unknown"
+
+
 config_ = {}
 try:
     with open(os.path.join(os.path.dirname(__file__), "../config.json"), "r", encoding="utf-8") as json_file:
@@ -58,6 +80,7 @@ class MainWindow(QWidget, Ui_Form):
             self.org_point.append([height, left_, width, top])
         
         self.frame_num = frame_num
+        self.app_version = f"v{get_app_version().lstrip('v')}"
         self.my_thread = MyThread()
         self.my_thread.run = fun
         self.my_thread.start()
@@ -69,6 +92,14 @@ class MainWindow(QWidget, Ui_Form):
         self.btn_setting.setStyleSheet("background-color: rgba(0,0,0,100); color: white; border-radius: 5px; font-size: 20px;")
         self.btn_setting.clicked.connect(self.open_settings)
         self.btn_setting.show()
+        self.btn_setting.raise_()
+
+        self.version_label = QLabel(self.app_version, self)
+        self.version_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.version_label.setFont(self.hint2.font())
+        self.version_label.setStyleSheet(self.hint2.styleSheet())
+        self.version_label.hide()
+        self.win_resize(None)
         self.btn_setting.raise_()
 
         # 設定定時器
@@ -142,6 +173,24 @@ class MainWindow(QWidget, Ui_Form):
         obj.setStyleSheet(color)
         obj.setText(txt)
 
+    def position_version_label(self):
+        if not hasattr(self, "version_label"):
+            return
+        img_rect = self.img1.geometry()
+        hint_rect = self.hint2.geometry()
+        bottom_gap = hint_rect.top() - (img_rect.top() + img_rect.height())
+        label_h = hint_rect.height()
+        label_y = img_rect.top() - bottom_gap - label_h
+        if label_h < 20 or label_y < 0:
+            self.version_label.hide()
+            return
+        self.version_label.setGeometry(
+            hint_rect.left(), int(label_y), hint_rect.width(), label_h)
+        self.version_label.show()
+        self.version_label.raise_()
+        if hasattr(self, "btn_setting"):
+            self.btn_setting.raise_()
+
     def win_resize(self, event):
         Proportion_X = self.width()/self.org_point[0][2]
         Proportion_Y = self.height()/self.org_point[0][0]
@@ -160,6 +209,7 @@ class MainWindow(QWidget, Ui_Form):
                 blank_Y = max(0, (self.height() - height - height_hint2)//2)
         
             self.obj[i].setGeometry(int(left_+blank_X), int(top+blank_Y),  int(width), int(height))
+        self.position_version_label()
         pass
 
     def update_screen(self):
