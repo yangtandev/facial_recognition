@@ -10,7 +10,7 @@ import os, json, time, subprocess, sys
 
 def get_app_version():
     root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    release_note = os.path.join(root, "release_note.md")
+    release_note = os.path.join(root, "RELEASE_NOTES.md")
     try:
         with open(release_note, "r", encoding="utf-8") as f:
             for line in f:
