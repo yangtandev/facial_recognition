@@ -95,9 +95,13 @@ class MainWindow(QWidget, Ui_Form):
         self.btn_setting.raise_()
 
         self.version_label = QLabel(self.app_version, self)
-        self.version_label.setAlignment(QtCore.Qt.AlignCenter)
-        self.version_label.setFont(self.hint2.font())
-        self.version_label.setStyleSheet(self.hint2.styleSheet())
+        version_font = self.hint2.font()
+        version_font.setPointSize(14)
+        self.version_label.setFont(version_font)
+        self.version_label.setAlignment(
+            QtCore.Qt.AlignRight | QtCore.Qt.AlignBottom)
+        self.version_label.setStyleSheet(
+            self.version_label_style(self.hint2.styleSheet()))
         self.version_label.hide()
         self.win_resize(None)
         self.btn_setting.raise_()
@@ -172,21 +176,33 @@ class MainWindow(QWidget, Ui_Form):
     def update_hint(self, obj, color, txt):
         obj.setStyleSheet(color)
         obj.setText(txt)
+        if obj is self.hint2 and hasattr(self, "version_label"):
+            self.version_label.setStyleSheet(self.version_label_style(color))
+
+    def version_label_style(self, style):
+        keep = []
+        for part in style.split(";"):
+            rule = part.strip()
+            if not rule:
+                continue
+            prop = rule.split(":", 1)[0].strip().lower()
+            if prop in ("background", "background-color", "font", "font-size"):
+                continue
+            keep.append(rule)
+        keep.extend(["background-color: transparent", "font-size: 14pt"])
+        return "; ".join(keep) + ";"
 
     def position_version_label(self):
         if not hasattr(self, "version_label"):
             return
-        img_rect = self.img1.geometry()
-        hint_rect = self.hint2.geometry()
-        bottom_gap = hint_rect.top() - (img_rect.top() + img_rect.height())
-        available_h = img_rect.top() - bottom_gap
-        label_h = min(hint_rect.height(), available_h)
-        label_y = img_rect.top() - bottom_gap - label_h
-        if label_h < 20 or label_y < 0:
+        if self.width() < 20 or self.height() < 20:
             self.version_label.hide()
             return
-        self.version_label.setGeometry(
-            hint_rect.left(), int(label_y), hint_rect.width(), label_h)
+        self.version_label.adjustSize()
+        margin = 10
+        self.version_label.move(
+            self.width() - self.version_label.width() - margin,
+            self.height() - self.version_label.height() - margin)
         self.version_label.show()
         self.version_label.raise_()
         if hasattr(self, "btn_setting"):
