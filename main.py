@@ -780,7 +780,7 @@ class FaceRecognitionSystem:
             LOGGER.warning(f"API unavailable, skipping today log refresh: {e}")
             return False
 
-    def _rebuild_assets(self):
+    def _rebuild_assets(self, force_voice=False):
         """[2026-04-24 Offline Resilience] Non-blocking, offline-safe asset rebuild.
         Skips rsync if no network. Uses incremental voice rebuild (no rmtree).
         Falls back to existing local data when offline."""
@@ -800,7 +800,7 @@ class FaceRecognitionSystem:
             LOGGER.warning("No network detected, skipping server sync. Using local data.")
 
         # 1. Voice (IO Bound) - Incremental rebuild (never delete existing files)
-        self._incremental_voice_rebuild()
+        self._incremental_voice_rebuild(force=force_voice)
 
         # 2. Descriptors (CPU Bound) - Run SECOND
         if os.path.exists(dp):
@@ -842,7 +842,7 @@ class FaceRecognitionSystem:
 
         LOGGER.info("Assets rebuild complete.")
 
-    def _incremental_voice_rebuild(self):
+    def _incremental_voice_rebuild(self, force=False):
         """[2026-04-24 Offline Resilience] Incremental voice rebuild.
         Only generates missing voice files. Never deletes existing files upfront.
         If gTTS fails (no network), existing files are preserved."""
@@ -874,18 +874,18 @@ class FaceRecognitionSystem:
         for key, txt in generic_texts.items():
             fn = f"_{key}.mp3"
             expected_files.add(fn)
-            if not os.path.isfile(os.path.join(vp, fn)):
+            if force or not os.path.isfile(os.path.join(vp, fn)):
                 tasks.append((fn, txt))
         for key, txt in hint_texts.items():
             fn = f"{key}.mp3"
             expected_files.add(fn)
-            if not os.path.isfile(os.path.join(vp, fn)):
+            if force or not os.path.isfile(os.path.join(vp, fn)):
                 tasks.append((fn, txt))
         for name in names:
             for key, txt in generic_texts.items():
                 fn = f"{name}_{key}.mp3"
                 expected_files.add(fn)
-                if not os.path.isfile(os.path.join(vp, fn)):
+                if force or not os.path.isfile(os.path.join(vp, fn)):
                     tasks.append((fn, f"{name}{txt}"))
 
         # Remove orphaned voice files (people removed from pic_bak)
@@ -903,16 +903,25 @@ class FaceRecognitionSystem:
             self._network_tasks_done["voice"] = True
             return
 
-        LOGGER.info(f"Stage 1/2: Generating {len(tasks)} missing voice files...")
+        self._network_tasks_done["voice"] = False
+        LOGGER.info(f"Stage 1/2: Generating {len(tasks)} voice files...")
         gen_success = 0
         gen_fail = 0
 
         def gen_one_voice(filename, text):
+            target = os.path.join(vp, filename)
+            tmp_target = f"{target}.{os.getpid()}.tmp"
             try:
                 tts = gTTS(text=text, lang='zh-tw')
-                tts.save(os.path.join(vp, filename))
+                tts.save(tmp_target)
+                os.replace(tmp_target, target)
                 return True
             except Exception:
+                try:
+                    if os.path.exists(tmp_target):
+                        os.remove(tmp_target)
+                except Exception:
+                    pass
                 return False
 
         with ThreadPoolExecutor() as executor:
@@ -1101,6 +1110,7 @@ class FaceRecognitionSystem:
                 self.state.features_dict = f
                 self._update_profile_dict()
                 self._load_or_build_index(force_rebuild=True)
+                self._incremental_voice_rebuild()
         finally:
             self.update_lock.release()
 
@@ -1337,7 +1347,8 @@ class FaceRecognitionSystem:
 
             # [2026-01-30 Fix] Check if asset rebuild is needed
             # Rebuild if 'say' (voice content) or 'Server' (staff list source) changed
-            need_rebuild = (new_config.get("say") != CONFIG.get("say")) or \
+            say_changed = new_config.get("say") != CONFIG.get("say")
+            need_rebuild = say_changed or \
                            (new_config.get("Server") != CONFIG.get("Server"))
 
             # Update global CONFIG
@@ -1364,7 +1375,7 @@ class FaceRecognitionSystem:
                         "Config changed (Say/Server), triggering asset rebuild...")
                     # This handles syncing, voice generation, and descriptor generation
                     # Note: This is blocking, UI might freeze briefly
-                    self._rebuild_assets()
+                    self._rebuild_assets(force_voice=say_changed)
                     # [2026-04-24 Fix] Reload features into memory after disk rebuild
                     # Without this, self.state.features_dict and ann_index remain stale
                     self._load_features_and_profiles()
