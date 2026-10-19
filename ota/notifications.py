@@ -29,6 +29,8 @@ def send_mail(config, event, recipient):
     message["From"], message["To"] = smtp["from"], recipient
     title = {"camera": "攝影機連線異常", "mqtt": "MQTT／建檔同步異常",
              "core": "辨識服務異常", "test": "通知測試"}.get(event.get("alert"), "更新失敗")
+    if event.get("kind") == "update":
+        title = {"enrollment": "首次接入失敗", "agent_upgrade": "更新器維護失敗"}.get(event.get("operation"), title)
     label = " ".join(f"{event.get('project', 'unknown')} / {event.get('location', 'unknown')}".split())
     message["Subject"] = "OTA " + title + "：" + label
     suffix = hashlib.sha256(recipient.encode()).hexdigest()[:16]

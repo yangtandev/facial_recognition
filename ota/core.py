@@ -66,12 +66,16 @@ def sync_directory(path):
 
 
 def atomic_json(path, value):
+    atomic_text(path, json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False))
+
+
+def atomic_text(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, name = tempfile.mkstemp(prefix=".ota-", dir=path.parent)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            json.dump(value, stream, ensure_ascii=False, indent=2, allow_nan=False)
+            stream.write(value)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(name, path)
@@ -299,7 +303,7 @@ class Store:
             data.setdefault("rollback_completed_at", now)
         public = {key: data[key] for key in ("from_version", "target_version", "sha256", "running_version",
                   "service_healthy", "rollback", "error", "rollback_error", "failed_at",
-                  "rollback_started_at", "rollback_failed_at", "rollback_completed_at") if key in data}
+                  "rollback_started_at", "rollback_failed_at", "rollback_completed_at", "operation") if key in data}
         event = {"event_id": str(uuid.uuid4()), "device_id": identity["device_id"],
                  "project": identity.get("project", "unknown"),
                  "location": identity.get("location", "unknown"),

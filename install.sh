@@ -4,18 +4,35 @@ set -e
 # 初次安裝與既有主機共用 OTA/SMTP 設定入口；設定階段不改辨識 config。
 PROJECT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 cd "$PROJECT_DIR"
-if [ "${1:-}" != "" ] && [ "${1:-}" != "--ota-config-only" ]; then
-    echo "用法: bash install.sh [--ota-config-only]"
+if [ "${1:-}" != "" ] && [ "${1:-}" != "--ota-config-only" ] && [ "${1:-}" != "--ota-setup" ] && [ "${1:-}" != "--ota-status" ]; then
+    echo "用法: bash install.sh [--ota-config-only|--ota-setup|--ota-status]"
     exit 1
 fi
+if [ "${1:-}" = "--ota-setup" ] || [ "${1:-}" = "--ota-status" ]; then
+    OTA_PYTHON_CMD=""
+    for OTA_CANDIDATE in python3 python3.10 python3.11 python3.12 python3.13; do
+        if command -v "$OTA_CANDIDATE" >/dev/null 2>&1 && "$OTA_CANDIDATE" -c 'import sys; exit(0 if sys.version_info >= (3, 10) else 1)'; then
+            OTA_PYTHON_CMD="$OTA_CANDIDATE"
+            break
+        fi
+    done
+    if [ -z "$OTA_PYTHON_CMD" ]; then
+        echo "OTA 需要已安裝的 Python 3.10+ 與相符 venv 支援；原辨識服務未變更。"
+        exit 1
+    fi
+    if [ "${1:-}" = "--ota-status" ]; then
+        exec "$OTA_PYTHON_CMD" -m ota.setup --status --project "$PROJECT_DIR" "${@:2}"
+    fi
+    exec "$OTA_PYTHON_CMD" -m ota.setup --project "$PROJECT_DIR" "${@:2}"
+fi
 if [ "${1:-}" != "--ota-config-only" ] && { [ -e config.json ] || [ -L config.json ]; }; then
-    echo "已有 config.json；保留現場設定，請使用 bash install.sh --ota-config-only。"
+    echo "已有 config.json；修改設定請用 --ota-config-only，首次接入／維護 OTA 請用 --ota-setup。"
     exit 1
 fi
 echo "▶ 設定主機角色與 OTA／SMTP（開發機可略過 SMTP）..."
 python3 -m ota.configure --project "$PROJECT_DIR"
 if [ "${1:-}" = "--ota-config-only" ]; then
-    echo "▶ 設定完成；已安裝 agent 者請依 README 重啟服務；首次接入請繼續 baseline 驗收。"
+    echo "▶ 設定完成；新版 agent 將自動讀取設定。首次接入請執行 bash install.sh --ota-setup。"
     exit 0
 fi
 
@@ -115,7 +132,8 @@ pip install -r requirements.txt
 
 # --- 6. SSH 金鑰設定 ---
 echo "▶ [3/6] SSH 金鑰設定..."
-SSH_KEY_PATH="/home/$CURRENT_USER/.ssh/id_rsa"
+SSH_KEY_PATH="$HOME/.ssh/id_rsa"
+mkdir -p "$HOME/.ssh"
 if [ ! -f "$SSH_KEY_PATH" ]; then
     echo "  >> 未找到 SSH 金鑰，自動產生..."
     ssh-keygen -t rsa -b 4096 -N "" -f "$SSH_KEY_PATH" -C "auto-generated@face-system"

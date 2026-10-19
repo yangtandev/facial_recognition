@@ -798,17 +798,22 @@ class ConfigurationTests(FilesystemTests):
             self.assertFalse((project / "config.json").exists())
         self.assertNotEqual(*identifiers)
 
-    def test_existing_update_lock_prevents_setup_from_overwriting_config(self):
+    def test_settings_wait_for_update_without_stopping_service(self):
         from ota.configure import configure
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError
         project, target, existing = self.configure_fixture()
         installed = Path(existing["state_dir"]) / "agent.json"
         atomic_json(installed, existing)
         before = installed.read_bytes()
-        with file_lock(installed.parent / "update.lock"), \
+        with ThreadPoolExecutor(max_workers=1) as pool, \
              patch("ota.configure.prompt", side_effect=lambda label, default="", **kwargs: default), \
-             self.assertRaises(BlockingIOError):
-            configure(project)
-        self.assertEqual(before, installed.read_bytes())
+             patch("builtins.print"):
+            with file_lock(installed.parent / "update.lock"):
+                future = pool.submit(configure, project)
+                with self.assertRaises(TimeoutError):
+                    future.result(timeout=0.1)
+                self.assertEqual(before, installed.read_bytes())
+            self.assertEqual(installed, future.result(timeout=5))
 
     def configure_fixture(self, role="test", installed=False):
         project = self.root / "project"

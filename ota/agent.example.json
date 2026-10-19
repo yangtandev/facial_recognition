@@ -12,8 +12,8 @@
     "from": "ota@example.com",
     "to": ["admin@example.com"]
   },
-  "state_dir": "/home/ubuntu/.local/share/facial-ota",
-  "shared_dir": "/home/ubuntu/facial_recognition",
+  "state_dir": "~/.local/share/facial-ota",
+  "shared_dir": "~/facial_recognition",
   "python": "/usr/bin/python3",
   "health_port": 8765,
   "poll_seconds": 300,

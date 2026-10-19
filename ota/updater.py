@@ -37,6 +37,14 @@ def systemctl(*args):
                           capture_output=True, text=True, timeout=90).stdout.strip()
 
 
+def independent_python(command, shared, state):
+    executable = shutil.which(command)
+    if not executable or any(path.is_relative_to(root) for path in
+            (Path(executable).absolute(), Path(executable).resolve()) for root in (shared, state)):
+        raise ValueError("Interpreter must be installed outside app/release/state directories")
+    return executable
+
+
 class Agent:
     def __init__(self, config_path):
         self.config = read_json(config_path)
@@ -218,7 +226,8 @@ class Agent:
             raise ValueError("Explicit project applicability required")
         return value
 
-    def stage(self, release, manifest, attempt):
+    def stage(self, release, manifest, attempt, compare_baseline=True):
+        self.target_python(manifest)  # Fail before downloading a large incompatible package.
         target = self.root / "releases" / (release["tag_name"] + "-" + attempt)
         target.mkdir(parents=True, mode=0o700)
         archive = target / "package.tar.gz"
@@ -240,7 +249,24 @@ class Agent:
             os.fsync(output.fileno())
         if total != size or digest(archive) != manifest["sha256"]:
             raise ValueError("Archive integrity check failed")
-        return self.prepare(target, manifest)
+        return self.prepare(target, manifest, compare_baseline=compare_baseline)
+
+    def target_python(self, manifest):
+        minor = manifest.get("python", "")
+        if not isinstance(minor, str) or not re.fullmatch(r"3\.[0-9]{1,2}", minor) or int(minor.split(".")[1]) < 10:
+            raise ValueError("Invalid Release Python version")
+        candidates = [self.config.get("python", "python3"), "python" + minor]
+        for candidate in dict.fromkeys(candidates):
+            try:
+                executable = independent_python(candidate, self.shared, self.root)
+            except ValueError:
+                continue
+            value = subprocess.check_output([executable, "-c",
+                "import sys,platform;print(str(sys.version_info.major)+'.'+str(sys.version_info.minor));print(platform.machine())"],
+                text=True, timeout=30).splitlines()
+            if value == [minor, manifest.get("architecture")]:
+                return executable
+        raise ValueError("No installed system Python/CPU matches Release wheelhouse; original service is unchanged")
 
     def prepare(self, target, manifest, compare_baseline=True):
         archive = target / "package.tar.gz"
@@ -253,10 +279,7 @@ class Agent:
         if (info.get("version") != manifest["version"] or info.get("build_id") != manifest.get("build_id")
                 or info.get("commit") != manifest.get("commit")):
             raise ValueError("Build identity mismatch")
-        expected_python = subprocess.check_output([self.config.get("python", "python3"), "-c",
-            "import sys,platform;print(str(sys.version_info.major)+'.'+str(sys.version_info.minor));print(platform.machine())"], text=True, timeout=30).splitlines()
-        if expected_python != [manifest.get("python"), manifest.get("architecture")]:
-            raise ValueError("Target Python/CPU does not match Release wheelhouse")
+        python_cmd = self.target_python(manifest)
         baseline = self.current()[1] if compare_baseline else info
         if (info.get("data_schema") != 1 or info.get("feature_model_sha256") != baseline.get("feature_model_sha256")
                 or info.get("feature_model_sha256") != digest(app / "models/data/20180402-114759-vggface2.pt")):
@@ -270,7 +293,7 @@ class Agent:
                     if source.read(80).startswith(b"version https://git-lfs.github.com/spec/"):
                         raise ValueError("Unresolved Git LFS model")
         # Dependencies are prepared offline; the old environment is never modified.
-        subprocess.run([self.config.get("python", "python3"), "-m", "venv", str(app / "venv")], check=True, timeout=120)
+        subprocess.run([python_cmd, "-m", "venv", str(app / "venv")], check=True, timeout=120)
         python = str(app / "venv/bin/python")
         subprocess.run([python, "-m", "pip", "install", "--no-index", "--find-links", str(target / "wheelhouse"),
                         "--only-binary=:all:", "-r", "requirements.txt"], cwd=app, check=True, timeout=1800, stdout=subprocess.DEVNULL)
@@ -389,6 +412,7 @@ class Agent:
             systemctl("stop", self.service)
             atomic_json((self.shared / "config.json").resolve(), read_json(data["backup"]))
             self.point(Path(data["old_path"]))
+            systemctl("reset-failed", self.service)
             systemctl("start", self.service)
             verified = self.wait_healthy(data["old_info"])
             data.update(running_version=data["old_info"]["version"], rollback="success",
@@ -434,6 +458,8 @@ class Agent:
 
     def once(self):
         with file_lock(self.root / "update.lock", blocking=False):
+            if self.setup_pending():
+                return
             self.recover()
             if self.store.get("blocked") or self.config["role"] == "development":
                 return
@@ -483,7 +509,7 @@ class Agent:
             mail_once(self.config, self.store)
 
     def monitor(self):
-        if self.store.unfinished() or self.store.get("blocked"):
+        if self.setup_pending() or self.store.unfinished() or self.store.get("blocked"):
             return
         failures = {}
         try:
@@ -503,6 +529,23 @@ class Agent:
             summary = {"running_version": "unknown", "service_healthy": False}
         self.store.set("last_health", status)
         self.store.monitor(failures, self.identity(), summary, float(self.config.get("alert_grace_seconds", 300)))
+
+    def setup_pending(self):
+        path = self.root / "setup.json"
+        return path.is_file() and read_json(path).get("phase") not in ("complete", "failed", "rollback_failed")
+
+    def status(self):
+        try:
+            selected = self.current()[1]
+        except (OSError, ValueError, RuntimeError, KeyError, TypeError):
+            selected = None
+        path = self.root / "setup.json"
+        setup = read_json(path) if path.is_file() else {}
+        return {"selected_build": selected, "setup": {key: setup[key] for key in
+                ("phase", "target_version", "error", "rollback", "rollback_error", "backup_dir") if key in setup},
+                "pending": self.store.outstanding(), "latest_update": self.store.latest_summary(),
+                "last_health": self.store.get("last_health"), "cleanup_error": self.store.get("cleanup_error"),
+                "blocked": self.store.get("blocked", False)}
 
 
 def main():
@@ -552,10 +595,7 @@ def main():
             agent.point(baseline)
             agent.store.set("device_id", agent.config["device_id"])
     elif args.action == "status":
-        print(json.dumps({"selected_build": agent.current()[1], "pending": agent.store.outstanding(),
-                          "latest_update": agent.store.latest_summary(), "last_health": agent.store.get("last_health"),
-                          "cleanup_error": agent.store.get("cleanup_error"),
-                          "blocked": agent.store.get("blocked", False)}, indent=2))
+        print(json.dumps(agent.status(), ensure_ascii=False, indent=2))
     elif args.action == "retry":
         with file_lock(agent.root / "update.lock", blocking=False):
             key = version_key(args.version)
@@ -574,6 +614,7 @@ def main():
     else:
         while True:
             try:
+                agent = Agent(args.config)  # Apply atomic settings on the next iteration.
                 (agent.once if args.action == "poll" else agent.notify_once)()
             except Exception as error:
                 # No URLs, credentials, config or potentially sensitive stderr.

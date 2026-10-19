@@ -1,21 +1,22 @@
 """Enroll a verified baseline; install independent user services without sudo."""
 import argparse
+from contextlib import nullcontext
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import uuid
 
-from ota.core import atomic_json, file_lock, read_json, sync_directory, version_key
-from ota.updater import Agent, systemctl, update_ready
+from ota.core import atomic_json, atomic_text, file_lock, read_json, sync_directory, sync_tree, version_key
+from ota.updater import Agent, independent_python, systemctl, update_ready
 
 
-def install(config_path, baseline=None, enable=False, upgrade=False):
+def install(config_path, baseline=None, enable=False, upgrade=False, _locked=False):
     os.umask(0o077)
     agent = Agent(config_path)
-    with file_lock(agent.root / "update.lock", blocking=False), \
-         file_lock(agent.root / "notify.lock", blocking=False), \
-         file_lock(agent.root / "report.lock", blocking=False):
+    with (nullcontext() if _locked else file_lock(agent.root / "update.lock", blocking=False)), \
+         (nullcontext() if _locked else file_lock(agent.root / "notify.lock", blocking=False)), \
+         (nullcontext() if _locked else file_lock(agent.root / "report.lock", blocking=False)):
         if agent.config["role"] == "development":
             raise ValueError("Development hosts do not install automatic OTA services")
         baseline = agent.current()[0] if upgrade else Path(baseline).resolve(strict=True)
@@ -47,13 +48,14 @@ def install(config_path, baseline=None, enable=False, upgrade=False):
         for path in (agent.root, baseline, directory):
             if any(character in str(path) for character in ('%', '\n', '\r', '"', '\\')) or " " in str(path):
                 raise ValueError("Service paths must not contain whitespace or systemd specifiers")
-        python = shutil.which(agent.config.get("python", "python3"))
-        if not python or Path(python).resolve().is_relative_to(agent.shared) or Path(python).resolve().is_relative_to(agent.root):
-            raise ValueError("Agent interpreter must be installed outside app/release/state directories")
+        python = independent_python(agent.config.get("python", "python3"), agent.shared, agent.root)
         if upgrade and Path(__file__).resolve().is_relative_to(runtime):
             raise ValueError("Run --upgrade from the new project ota tools, not the installed runtime")
         staging = agent.root / ("agent-next-" + str(uuid.uuid4()))
         shutil.copytree(Path(__file__).parent, staging / "ota", ignore=shutil.ignore_patterns("__pycache__", "test_*", "*.local.json", "dist", "wheelhouse"))
+        subprocess.run([python, "-c", "import ota.updater, ota.setup, ota.configure"], cwd=staging,
+                       check=True, timeout=30, capture_output=True)
+        sync_tree(staging)
         destination = agent.root / "agent.json"
         if destination.exists():
             atomic_json(agent.root / ("agent-before-upgrade-" + str(uuid.uuid4()) + ".local.json"), read_json(destination))
@@ -64,14 +66,14 @@ def install(config_path, baseline=None, enable=False, upgrade=False):
         agent.point(baseline)
         agent.store.set("device_id", agent.config["device_id"])
         dropin.parent.mkdir(parents=True, exist_ok=True)
-        dropin.write_text("[Service]\nWorkingDirectory=" + str(agent.root / "current") + "\nExecStart=\nExecStart="
+        atomic_text(dropin, "[Service]\nWorkingDirectory=" + str(agent.root / "current") + "\nExecStart=\nExecStart="
                           + str(agent.root / "current/venv/bin/python") + " -u " + str(agent.root / "current/main.py")
-                          + "\nEnvironment=FACIAL_OTA_HEALTH_PORT=" + str(agent.port) + "\n", encoding="utf-8")
+                          + "\nEnvironment=FACIAL_OTA_HEALTH_PORT=" + str(agent.port) + "\n")
         directory.mkdir(parents=True, exist_ok=True)
         for action, unit in zip(("poll", "notify"), units):
-            unit.write_text("[Unit]\nDescription=Facial OTA " + action + "\nAfter=network.target\n\n[Service]\nType=simple\n"
+            atomic_text(unit, "[Unit]\nDescription=Facial OTA " + action + "\nAfter=network.target\n\n[Service]\nType=simple\n"
                             + "WorkingDirectory=" + str(runtime) + "\nExecStart=" + python + " -m ota.updater --config "
-                            + str(destination) + " " + action + "\nRestart=on-failure\nRestartSec=15\nUMask=0077\n\n[Install]\nWantedBy=default.target\n", encoding="utf-8")
+                            + str(destination) + " " + action + "\nRestart=on-failure\nRestartSec=15\nUMask=0077\n\n[Install]\nWantedBy=default.target\n")
         sync_directory(directory)
         if upgrade:
             legacy = directory / "facial-ota-report.service"

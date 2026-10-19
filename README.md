@@ -3,7 +3,8 @@
 - [開發機](#development-host)：開發、測試、封裝及發布。
 - [測試機／正式機](#field-host)：首次安裝與既有主機設定。
 - [SMTP 設定](#smtp)：自動寫入主機 ID、角色與通知設定。
-- [首次接入 OTA](#ota-enrollment)：建立可驗證、可回退的基準版本。
+- [首次接入 OTA](#ota-enrollment)：一次指令自動準備、驗收及啟用。
+- [多台主機共用設定](#fleet-profile)：匯出私有部署設定，省去逐台輸入帳密。
 - [運作範例](#runtime-flow)、[發布更新](#release)、[故障處理](#operations)、[驗收方法](#acceptance)。
 
 ## 1. 準備與主機角色
@@ -67,8 +68,8 @@
 2. 新主機依[第 2 節](#first-install)安裝；已有 config 的主機使用[僅設定模式](#smtp)，不重跑完整安裝。
 3. 測試機選 test；正式機選 production。精靈自動產生各機不同的 UUID。
 4. 保留各機 API、location、攝影機、照片來源與 MQTT。
-5. 依[第 4 節](#ota-enrollment)人工準備並驗收健康版 baseline，再安裝及啟用 agent。
-6. 測試機 baseline 可用健康版 RC／正式版；正式機僅用已驗收、人工放行的正式版。
+5. 依[第 4 節](#ota-enrollment)執行一次接入指令；程式自動準備基準版本（baseline）、驗收及啟用服務。
+6. 測試機自動選適用 RC／正式版，正式機只選人工放行的正式版；兩者都須在本機通過啟動檢查。
 7. 測試機通過 RC 人工實測後，由開發人員發布正式版；測試機維持 test，也會更新成正式版。
 8. 各機獨立查詢、更新與寄信，不互相等待。
 
@@ -95,7 +96,7 @@
    journalctl --user -u facial_recognition.service -n 100 --no-pager
    ```
 
-7. 需要自動更新時繼續[首次接入](#ota-enrollment)；安裝程式／寫入 SMTP 不等於已啟用 OTA。
+7. 重啟、登入桌面並確認原辨識正常後，執行 `bash install.sh --ota-setup` 自動接入 OTA；寫入 SMTP 本身不等於已啟用 OTA。
 
 - 已有 config.json 時，完整安裝會拒絕執行，避免覆蓋現場設定；改用下節。
 - 不用 setting/build_config.py 遷移舊設定，避免遺失未知欄位。
@@ -104,35 +105,23 @@
 
 ## 3. OTA／SMTP 設定
 
-### 3.1 既有主機或修改設定
+### 3.1 修改設定或先測試 SMTP
 
-1. 將本版 ota/ 與 install.sh 提供至原專案；不要覆寫正在運行的主程式。
-2. 已安裝 agent 者先確認更新已結束，再停止 poll／notify；首次尚未安裝者略過：
-
-   ```bash
-   systemctl --user stop facial-ota-poll.service facial-ota-notify.service
-   ```
-
-3. 在原專案執行：
+1. 使用本版 ota/ 與 install.sh，在原專案執行：
 
    ```bash
-   cd /home/ubuntu/facial_recognition
+   cd "$HOME/facial_recognition"
    bash install.sh --ota-config-only
    ```
 
-4. 此模式僅設定 OTA／SMTP，不執行 apt、不改辨識 config.json、不建立／重啟辨識服務。
-5. 已有設定時 Enter 可沿用；UUID、路徑及其他欄位保留。敏感欄位不顯示既有值；要清空既有 token／帳密時，直接編輯實際設定檔。
-6. 若 state_dir/agent.json 已存在，精靈自動修改該檔；未安裝則寫入 ota/agent.local.json。自訂路徑可執行：
+2. 不用手動停止服務；有 OTA 作業進行時，精靈會等待安全時機再保存。此模式不執行 apt、不改辨識 config.json、不切換版本。
+3. Enter 沿用既有值；UUID、路徑及未知欄位保留。敏感值不顯示；要清空既有 token／帳密時，直接編輯實際設定檔。
+4. 精靈自動找到已安裝的 state_dir/agent.json；尚未接入則寫入 ota/agent.local.json。權限為 600，舊值保存為同目錄的 *.before-smtp.local.json。
+5. 新版 poll／notify 每輪重新讀取設定，SMTP／GitHub token 改好後不用重啟；生效需等下一輪。舊版 agent 先執行一次 --ota-setup 更新工具。
+6. 首次尚未接入者繼續第 4 節。需要自訂設定位置時：
 
    ```bash
-   python3 -m ota.configure --project /home/ubuntu/facial_recognition --config /absolute/path/agent.json
-   ```
-
-7. 精靈顯示實際寫入路徑；權限 600，舊設定備份在同目錄的 *.before-smtp.local.json。
-8. 首次接入繼續第 4 節；已安裝者完成後重啟：
-
-   ```bash
-   systemctl --user restart facial-ota-poll.service facial-ota-notify.service
+   python3 -m ota.configure --project "$HOME/facial_recognition" --config /absolute/path/agent.json
    ```
 
 ### 3.2 輸入欄位與設定檔
@@ -140,7 +129,7 @@
 | 欄位 | 填寫 |
 | --- | --- |
 | 角色 | development、test、production |
-| GitHub repo | owner/repo |
+| GitHub repo | owner/repo；首次從現有 Git remote 預填，已有設定沿用 |
 | GitHub token | 私有 repo 必填唯讀 PAT；公開 repo 可空白 |
 | SMTP 主機 | 供應商的寄信主機 |
 | TLS／連接埠 | 通常 starttls＋587 或 ssl＋465，依供應商 |
@@ -150,96 +139,79 @@
 
 - device_id 自動產生、重設時沿用；不需要 device_token／token_sha256。
 - Fine-grained PAT 僅選此 repo、Contents: Read-only；記錄到期日，組織要求時等待核准。[GitHub PAT 設定](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
-- 核對 shared_dir（原專案）、state_dir（原專案及可清除版本目錄之外）、python（app／state 以外的系統 Python 3.10+，minor 與 Release 相同）。
-- 預設狀態目錄為登入使用者的 ~/.local/share/facial-ota；以下指令以 ubuntu 為例，自訂時對應替換。
+- shared_dir、state_dir 與系統 Python 預設自動取得；非標準部署再核對路徑。agent 使用 app／state 以外的系統 Python 3.10+，程式環境另依 Release 所需 minor 建立；主機有安裝相符 minor 時會自動選用，沒有就保留原服務並通知。
+- 以下 `$HOME` 代表目前登入使用者的家目錄，不限定帳號；專案預設位於 `$HOME/facial_recognition`，狀態預設位於 `$HOME/.local/share/facial-ota`。自訂路徑時依實際設定替換，勿用 sudo 執行使用者服務指令。
 - 專案名取自 config.json 的 Server.API_url 主機名稱第一段；地點以 Server.location_ID 查 API_url/locations/ID/ 的 name。
 - 例如 https://demosite.api.ginibio.com/api/v1、ID 1，專案 demosite，地點可為「測試閘道」。查詢失敗沿用快取，首次失敗顯示 location ID。
 - 寄信使用 Python 標準函式庫與 TLS，不需另裝郵件伺服器。[SMTP 文件](https://docs.python.org/3/library/smtplib.html)
 
+<a id="fleet-profile"></a>
+
+### 3.3 多台主機共用設定，免重複輸入帳密
+
+1. 在一台已設定好的主機，匯出共用部署設定：
+
+   ```bash
+   python3 -m ota.configure --export-profile "$HOME/facial-ota-profile.local.json"
+   ```
+
+2. 檔案只含角色、repo、GitHub token 與 SMTP；不含 UUID、主機路徑或辨識 config。檔案含帳密、權限 600，請用安全檔案傳送方式提供給其他主機，不加入 Git。
+3. 其他主機保留自己的 config.json，取得新版 ota/、install.sh 與該部署設定檔後執行：
+
+   ```bash
+   cd "$HOME/facial_recognition"
+   bash install.sh --ota-setup --profile "$HOME/facial-ota-profile.local.json" --role production
+   ```
+
+4. 測試機改用 --role test。此模式不再詢問 SMTP；每台自動產生不同 UUID、依自己 config 查專案與地點。已有主機設定優先保留，共用檔只補缺少的值；明確指定的 role 會套用。
+5. 日後改帳密用 --ota-config-only；不用重新產生 UUID 或重新部署辨識程式。匯出設定只是省輸入，不會替每台機器開放遠端登入或自動傳送檔案。
+
 <a id="ota-enrollment"></a>
 
-## 4. 首次接入 OTA
+## 4. 首次接入 OTA：一次指令
 
-### 4.1 備份與準備 baseline
+### 4.1 現場需要做的事
 
-1. 舊機不會因發布 tag 取得 OTA；每台需先人工接入一次。
-2. 備份設定與原服務內容，另備份照片、特徵、業務資料與金鑰：
-
-   ```bash
-   cd /home/ubuntu/facial_recognition
-   OTA_BACKUP_DIR=$(mktemp -d /home/ubuntu/facial-before-ota.XXXXXX)
-   install -m 600 config.json "$OTA_BACKUP_DIR/config.json"
-   systemctl --user cat facial_recognition.service > "$OTA_BACKUP_DIR/facial_recognition.service.txt"
-   ```
-
-3. 完成 SMTP 設定，確認新版必要 config 欄位齊全；只補缺少項目、保留現場值。首次 baseline 準備不會自動遷移 config。
-4. 從已核對的 GitHub Release 取得完整 .tar.gz 與 release.json；Python minor／CPU 相符。
-5. 測試機可選健康 RC／正式版；正式機僅選人工放行的健康正式版。替換套件路徑：
+1. 確認原 facial_recognition.service 正在運作，該服務使用這台自己的 config.json。安排可接受短暫切換的維護時段。
+2. 將本版 ota/ 與 install.sh 提供至原專案；不用覆寫正在運行的 main.py、config 或 venv。
+3. 開發端須先發布適用專案、附完整更新包與 release.json 的 GitHub Release。只有 tag／source archive 不足以接入；正式機沒有適用正式 Release 時不會改裝 RC。
+4. 已完成 SMTP 設定者只需執行：
 
    ```bash
-   python3 -m ota.updater --config ota/agent.local.json prepare-baseline --archive /path/to/package.tar.gz --manifest /path/to/release.json
+   cd "$HOME/facial_recognition"
+   bash install.sh --ota-setup
    ```
 
-6. 記下輸出的 app 絕對路徑；準備階段不停止舊服務。
+5. 尚未設定者會先進入精靈；已設定者直接沿用，不重填帳密。多台主機可用上節 profile。
+6. 畫面顯示 complete／「OTA 已啟用」後，確認影像、真人辨識、語音與照片同步。後續適用版本由主機自行更新。
 
-### 4.2 人工切換並驗收
+### 4.2 程式自動完成的步驟
 
-1. 安排可用 AnyDesk 介入的維護時段，建立 override：
+1. 依角色、專案與 SemVer 選 Release，下載完整更新包、驗證摘要及 Python／CPU 相容性。
+2. 另建程式環境；準備階段舊版繼續運作。只選主機已安裝且相符的系統 Python，不自動升級系統套件。
+3. 備份原服務設定與現場 config，保留原程式及環境；新欄位補預設、更名按規則遷移，衝突或模型不相容就拒絕切換。
+4. 短暫停止辨識／MQTT、切換新版，自動檢查版本／build ID／PID、模型推論、人臉索引、GUI、取像／偵測／比對執行緒，以及 MQTT 連線、訂閱和建檔照同步。
+5. 通過啟動與穩定觀察後，登記第一個基準版本（baseline），安裝並啟用 poll／notify。baseline 是日後回退的起點，不是另一種版本名稱。
+6. 攝影機暫離線不單獨觸發回退；update_ready=true 代表必要啟動檢查通過，healthy=true 還要求啟用相機有新影像。恢復後仍需影像及業務實測。
+
+### 4.3 斷線、失敗與重跑
+
+- 執行工作交給獨立的 facial-ota-setup.service；關閉終端或 AnyDesk 不會中止背景接入。主機重開後，在使用者服務啟動時依 checkpoint 復原。
+- 準備失敗不停止舊服務；切換／安裝失敗自動還原原設定與服務。照片、特徵與最新業務資料保留。
+- 原版沒有健康檢查時，恢復後只能確認原程序持續運行，回退結果記為 restored_unverified；不宣稱業務已全面正常，收到信後需確認辨識。
+- 恢復也失敗會記 rollback_failed／阻止後續更新，通知含失敗時間與時區；由 AnyDesk 人工修復。
+- 備份在 state_dir/enrollment/作業UUID，包含 site-config.json 與 original-service.txt；替換的工具／服務檔會移入備份目錄，不直接刪除。
+- SMTP 不通就先保存在本機，setup 背景工作持續補寄；完成後停用該一次性工作，一般監看由 notify 負責。
+- 同一接入仍在進行時重跑命令，只顯示同一工作，不重複切換；中斷的切換會先恢復原服務，不直接重做新版本。
+- 已完成 OTA 後，使用新版工具重跑 --ota-setup 會備份並更新獨立 agent、恢復 poll／notify；不重裝 app、不停止辨識、不更換 UUID。這一步用於 updater 本體維護，一般 app 更新不用跑。
+- 初次接入失敗後明確重跑 --ota-setup 可再試；一般自動更新仍遵守失敗版本不無限重試的規則。
+- 半套手動安裝或不明的既有服務檔不會直接覆寫；先查狀態及備份，避免把別人的設定當成自動安裝產物。
+- 查結果與日誌：
 
    ```bash
-   mkdir -p /home/ubuntu/.config/systemd/user/facial_recognition.service.d
-   nano /home/ubuntu/.config/systemd/user/facial_recognition.service.d/10-bootstrap.conf
+   bash install.sh --ota-status
+   journalctl --user -u facial-ota-setup.service -n 100 --no-pager
    ```
-
-2. 填入以下內容，所有 <BASELINE_APP> 換成準備好的 app 絕對路徑；health port 非 8765 時也調整：
-
-   ```ini
-   [Service]
-   WorkingDirectory=<BASELINE_APP>
-   ExecStart=
-   ExecStart=<BASELINE_APP>/venv/bin/python -u <BASELINE_APP>/main.py
-   Environment=FACIAL_OTA_HEALTH_PORT=8765
-   ```
-
-3. 重啟並驗收：
-
-   ```bash
-   systemctl --user daemon-reload
-   systemctl --user restart facial_recognition.service
-   python3 -m ota.updater --config ota/agent.local.json verify-baseline --baseline /absolute/baseline/app
-   ```
-
-4. 確認版本、程序、GUI、模型／辨識與 MQTT／同步；相機可用時也做真人辨識、語音及同步實測。
-5. 相機暫離線不單獨使驗收失敗，影像端到端實測待連線恢復後完成。
-6. 程式驗收未通過就停止接入，恢復原服務設定／config，再啟動。
-
-> 首次人工切換尚未受 OTA 自動回退保護；驗收通過才登記為 baseline。
-
-### 4.3 安裝與啟用
-
-1. 安裝獨立 agent：
-
-   ```bash
-   python3 -m ota.install_agent --config ota/agent.local.json --baseline /absolute/baseline/app
-   ```
-
-2. 查狀態並執行一次通知檢查；SMTP 測試信應已確認送達：
-
-   ```bash
-   cd /home/ubuntu/.local/share/facial-ota/agent
-   OTA_CFG=/home/ubuntu/.local/share/facial-ota/agent.json
-   python3 -m ota.updater --config "$OTA_CFG" status
-   python3 -m ota.updater --config "$OTA_CFG" notify-once
-   ```
-
-3. 確認後啟用：
-
-   ```bash
-   systemctl --user enable --now facial-ota-poll.service facial-ota-notify.service
-   ```
-
-4. 實際設定在 state_dir/agent.json；只改範例檔不影響已安裝服務。
-5. poll／notify 使用固定目錄的獨立程式；一般 app OTA 不自動替換 agent 本體。
 
 <a id="runtime-flow"></a>
 
@@ -333,10 +305,10 @@
    ```bash
    git lfs pull
    venv/bin/python -m pip download --only-binary=:all: -r requirements.txt -d ota/wheelhouse
-   venv/bin/python -m ota.package_release --version v1.0.1-rc.1 --wheelhouse ota/wheelhouse --output ota/dist/v1.0.1-rc.1 --target-python 3.10 --architecture x86_64 --projects demosite
+   venv/bin/python -m ota.package_release --version v1.4.0-rc.2 --wheelhouse ota/wheelhouse --projects demosite
    ```
 
-5. 替換版本、Python minor、CPU 與專案；--projects demosite otherproject 指定多專案，共用版才明確用 --projects '*'。
+5. 版本依現有 tag 選擇，不覆寫已發布 RC；上例 v1.4.0-rc.2 只是示例。Python minor、CPU 自動取封裝環境，輸出預設 ota/dist/版號；需與現場相符。跨環境才明確指定 --target-python／--architecture／--output。--projects demosite otherproject 指定多專案，共用版才明確用 --projects '*'。
 6. 建立相符 tag 的 draft Release，上傳 .tar.gz 與 release.json，核對完整才發布；RC 勾 pre-release。
 7. 測試機完成人工業務／故障驗收；有問題遞增 rc.N，不覆寫既有 tag／資產。
 8. 通過並人工放行後，保留已測程式、模型、依賴與遷移規則，重新封裝同目標正式版，如 v1.0.1-rc.2 → v1.0.1，核對最終套件並發布，不勾 pre-release。
@@ -352,18 +324,25 @@
 
 ### 7.1 查版本、健康、待寄通知
 
-在現場以原服務帳號操作，以下採預設路徑：
+在現場原專案以服務帳號查詢，不需手填狀態目錄：
 
 ```bash
-cd /home/ubuntu/.local/share/facial-ota/agent
-OTA_CFG=/home/ubuntu/.local/share/facial-ota/agent.json
+cd "$HOME/facial_recognition"
+bash install.sh --ota-status
+```
+
+要進一步查即時健康與日誌時，以下採預設路徑：
+
+```bash
+cd "$HOME/.local/share/facial-ota/agent"
+OTA_CFG="$HOME/.local/share/facial-ota/agent.json"
 python3 -m ota.updater --config "$OTA_CFG" status
 curl --noproxy '*' -sS http://127.0.0.1:8765/health | python3 -m json.tool
 systemctl --user show facial_recognition.service -p MainPID -p NRestarts
 journalctl --user -u facial_recognition.service -u facial-ota-poll.service -u facial-ota-notify.service -n 100 --no-pager
 ```
 
-- latest_update 顯示最近更新結果、回退及時間；selected_build 只是選中套件，不代表程序正常。
+- setup 顯示首次接入進度與錯誤，尚未接入時 selected_build 可為 null；latest_update 顯示最近更新結果、回退及時間。selected_build 只是選中套件，不代表程序正常。
 - 即時 health 的版本／build ID 符合目標、PID 符合 MainPID、update_ready=true、必要計數增加且 boot ID 穩定。
 - 相機暫離線時可 update_ready=true、camera_ok=false、healthy=false；檢查設備／網路並待重連。
 - pending 包含退避中待寄通知；last_health 是最近背景結果，以即時 health 為準。
@@ -392,7 +371,7 @@ journalctl --user -u facial_recognition.service -u facial-ota-poll.service -u fa
 - 重試失敗版本：python3 -m ota.updater --config "$OTA_CFG" retry --version v1.0.1；下次輪詢執行，不允許降版。
 - blocked=true：先 AnyDesk 修復並驗收，再執行 python3 -m ota.updater --config "$OTA_CFG" resume。
 - 手動補寄：停 notify，執行 python3 -m ota.updater --config "$OTA_CFG" notify-once，再啟動；退避中的通知等到期才寄。
-- 改 SMTP／GitHub token 用第 3 節精靈並重啟服務，不刪資料庫或重裝來清待寄數。
+- 改 SMTP／GitHub token 用第 3 節精靈，新版服務自動重讀；更新器本體或 agent 系統 Python 維護使用 --ota-setup。state_dir／shared_dir／health port 屬部署結構，變更需另行安排維護，不直接改成別台主機的值。不要用刪資料庫或重裝清待寄數。
 
 | 結果 | 處理 |
 | --- | --- |
@@ -419,7 +398,7 @@ journalctl --user -u facial_recognition.service -u facial-ota-poll.service -u fa
 1. 開發機執行離線測試，不連真實 SMTP、不改本機 systemd：
 
    ```bash
-   venv/bin/python -m unittest ota.test_ota -v
+   venv/bin/python -m unittest ota.test_ota ota.test_setup -v
    ```
 
 2. 實機故障測試用隔離 repo／測試專案，不向正式 repo 發布故障套件。保存主機、前後版本／build ID、時間、回退及信件紀錄。
@@ -427,7 +406,12 @@ journalctl --user -u facial_recognition.service -u facial-ota-poll.service -u fa
 
 | 測試 | 操作 | 預期 |
 | --- | --- | --- |
-| 舊機設定 | 備份 config，僅設定模式跑兩次 | config 不變、UUID 相同、私有設定 600 |
+| 舊機設定 | 僅設定模式跑兩次 | config 不變、UUID 相同、私有設定 600 |
+| 自動接入 | 原服務運行時執行 --ota-setup | 自動下載、備份、遷移、驗收、啟用，不手改服務 |
+| 多台共用設定 | 匯出 profile，在兩台不同專案匯入 | 無重複輸入帳密、UUID 不同，各自 config 保留 |
+| 設定熱讀 | poll／notify 運行中修改 SMTP／token | 無需停機重啟，下一輪使用新值 |
+| 中斷／重跑 | 接入中斷線、重啟，再重跑 | 同一工作復原，不重複切換；舊資料保留 |
+| Agent 維護 | 接入完成後再跑新版 --ota-setup | 不停止辨識、不換 UUID，更新器工具更新 |
 | SMTP | 精靈選寄測試信 | 管理員收到、密碼不顯示／入日誌 |
 | 選版 | 發 RC，再發同目標正式版 | RC 僅測試機；正式版兩種角色都更新 |
 | 草稿／專案 | 發 draft、舊版、不適用專案 | 不更新 |
@@ -445,3 +429,24 @@ journalctl --user -u facial_recognition.service -u facial-ota-poll.service -u fa
 
 - 相機恢復後仍需真人辨識、語音、GUI、影像與業務實測。
 - 自動測試不能取代實機攝影機、MQTT broker、SMTP 供應商與斷電演練。
+
+
+## 9. 已簡化與仍需人工處理的項目
+
+| 流程 | 現在做法 |
+| --- | --- |
+| 各台手動找版本、下載套件、填路徑 | --ota-setup 自動完成 |
+| 備份 config、編輯 systemd override、建立／啟用服務 | 首次接入程式自動完成，保留可復原備份 |
+| 主機 UUID、家目錄、專案路徑、GitHub repo 預填 | 自動取得；原設定優先保留 |
+| 多台重複輸入 SMTP／GitHub token | 一次匯出私有 profile，各台匯入並各自產生 UUID |
+| 改 SMTP／token 後逐台 stop／restart | 新版服務每輪重讀設定 |
+| 新版 app 更新、失敗回退、通知補送 | 現場背景服務自動完成 |
+| 不同 Python minor | 已安裝的相符系統 Python 可自動選用；未安裝或 CPU 不符時保留原服務，不自行改 OS |
+| 發布側手填 CPU／Python／輸出路徑 | 預設從封裝環境及版本自動取得 |
+
+- 仍需一次性提供新版工具與主機權限；只有 AnyDesk、尚無 updater 的舊主機，無法由開發機憑空遠端安裝。
+- API／地點／相機等現場參數、憑證與角色需由管理者提供；不從另一台複製業務 config。
+- RC 人工業務驗收、正式 Release 人工放行保留；正常啟動檢查不能代替所有業務測試。
+- wheelhouse 要與現場相容並經 RC 實測；正式版沿用已測依賴，不重新解析套件版本。
+- updater 本體維護使用新版 --ota-setup；此版不讓正在執行的 updater 在 app 更新途中替換自己。
+- 每台首次完成接入後，日常 app 發布只在開發端做一次，現場各機自行更新；不需逐台 pull、填路徑或重啟服務。

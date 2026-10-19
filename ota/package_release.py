@@ -2,17 +2,19 @@
 import argparse
 import io
 import json
+import platform
 from pathlib import Path
 import runpy
 import subprocess
 import tarfile
+import sys
 
 from ota.core import atomic_json, digest, migrate_config, read_json, version_key
 
 INCLUDE = {"main.py", "analytics_reporter.py", "install.sh", "requirements.txt", "README.md",
            "RELEASE_NOTES.md", "init", "models", "other", "ui", "web_ui", "setting", "py_ssh", "ota"}
 REQUIRED = ("main.py", "requirements.txt", "ota/__init__.py", "ota/core.py", "ota/health.py", "py_ssh/ssh.py",
-            "ota/updater.py", "ota/notifications.py", "ota/configure.py", "ota/install_agent.py", "ota/agent.example.json",
+            "ota/updater.py", "ota/notifications.py", "ota/configure.py", "ota/install_agent.py", "ota/setup.py", "ota/agent.example.json",
             "models/data/20180402-114759-vggface2.pt", "other/pvms_Library-0.0.2b0-py3-none-any.whl",
             "setting/ota_migrations.json")
 
@@ -76,13 +78,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default=".")
     parser.add_argument("--wheelhouse", required=True)
-    parser.add_argument("--output", required=True)
+    parser.add_argument("--output", help="Default: ota/dist/<version> under root")
     parser.add_argument("--version", required=True)
     parser.add_argument("--projects", nargs="+", required=True)
-    parser.add_argument("--target-python", required=True, help="e.g. 3.10; wheelhouse must match")
-    parser.add_argument("--architecture", required=True, choices=("x86_64", "aarch64"))
+    parser.add_argument("--target-python", default=f"{sys.version_info.major}.{sys.version_info.minor}",
+                        help="Default: current Python minor; wheelhouse must match")
+    parser.add_argument("--architecture", default=platform.machine(), choices=("x86_64", "aarch64"))
     args = parser.parse_args()
-    result = package(args.root, args.wheelhouse, args.output, args.version,
+    output = args.output or str(Path(args.root) / "ota/dist" / args.version)
+    result = package(args.root, args.wheelhouse, output, args.version,
                      args.projects, args.target_python, args.architecture)
     print(json.dumps(result, indent=2))
 
