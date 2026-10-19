@@ -1,6 +1,24 @@
 #!/bin/bash
 set -e
 
+# 初次安裝與既有主機共用 OTA/SMTP 設定入口；設定階段不改辨識 config。
+PROJECT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+cd "$PROJECT_DIR"
+if [ "${1:-}" != "" ] && [ "${1:-}" != "--ota-config-only" ]; then
+    echo "用法: bash install.sh [--ota-config-only]"
+    exit 1
+fi
+if [ "${1:-}" != "--ota-config-only" ] && { [ -e config.json ] || [ -L config.json ]; }; then
+    echo "已有 config.json；保留現場設定，請使用 bash install.sh --ota-config-only。"
+    exit 1
+fi
+echo "▶ 設定主機角色與 OTA／SMTP（開發機可略過 SMTP）..."
+python3 -m ota.configure --project "$PROJECT_DIR"
+if [ "${1:-}" = "--ota-config-only" ]; then
+    echo "▶ 設定完成；已安裝 agent 者請依 README 重啟服務；首次接入請繼續 baseline 驗收。"
+    exit 0
+fi
+
 # --- 1. Sudo 提權與 Keep-alive ---
 echo "▶ 為了安裝系統套件與設定服務，需要取得 sudo 權限。"
 sudo -v

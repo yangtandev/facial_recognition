@@ -11,8 +11,11 @@ from PyQt5.QtWidgets import (
 from PyQt5 import QtCore
 from ui.window_title import LargeTitleBar
 import os, json, time, subprocess, sys
+from ota.health import BUILD_IDENTITY
 
 def get_app_version():
+    if BUILD_IDENTITY["version"] != "unknown":
+        return BUILD_IDENTITY["version"]
     root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     release_note = os.path.join(root, "RELEASE_NOTES.md")
     try:

@@ -3,6 +3,7 @@ import os
 import json
 import subprocess
 import signal
+from ota.core import save_config
 
 app = Flask(__name__)
 app.secret_key = 'facial_recognition_secret_key_2026'
@@ -20,8 +21,7 @@ def load_config():
 
 
 def save_config_file(data):
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    save_config(CONFIG_PATH, data)
 
 # [2026-02-01 Fix] Disable caching for all responses to ensure UI updates immediately
 
@@ -68,6 +68,8 @@ def update_config():
         save_config_file(new_config)
 
         return jsonify({"success": True})
+    except BlockingIOError:
+        return jsonify({"success": False, "message": "OTA 驗收期間暫停設定寫入，請稍後再試。"}), 409
     except Exception as e:
         return jsonify({"success": False, "message": str(e)})
 

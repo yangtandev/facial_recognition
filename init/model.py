@@ -162,6 +162,8 @@ class Detector:
 
         while not self.stop_threads:
             now = time.time()
+            if getattr(self.system, "health", None) is not None:
+                self.system.health.pulse(f"detector:{self.frame_num}")
             if self.system.state.frame[self.frame_num] is not None:
                 detection_interval = max(
                     0.01, float(self.system.state.detection_interval))
@@ -1711,6 +1713,8 @@ class Comparison:
         while not self.stop_threads:
             # 動態調整頻率
             time.sleep(self.system.state.comparison_interval)
+            if getattr(self.system, "health", None) is not None:
+                self.system.health.pulse(f"comparison:{self.frame_num}")
             now = time.time()
 
             # [2026-02-11 Fix] Ensure display state is cleared even if no face is detected (frame_data is None)

@@ -14,6 +14,7 @@ from PyQt5.QtCore import Qt, QSize
 from PyQt5.QtGui import QFont, QIcon
 from ui import styles
 from ui.window_title import LargeTitleBar
+from ota.core import save_config
 
 # 設定檔路徑
 CONFIG_PATH = os.path.join(os.path.dirname(
@@ -664,8 +665,7 @@ class ConfigWindow(QWidget):
             cfg["excel_api_enabled"] = self.chk_excel.isChecked()
 
             # Write to file
-            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-                json.dump(cfg, f, ensure_ascii=False, indent=2)
+            save_config(CONFIG_PATH, cfg)
 
             # 手動觸發 service 更新（如果螢幕配置有變更）
             # (已移除，因為 service 不再依賴 config_window)

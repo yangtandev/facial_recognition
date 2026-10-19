@@ -5,6 +5,12 @@ Thumbs.db
 
 # --- Configuration & Secrets ---
 config.json
+ota/*.local.json
+ota/wheelhouse/
+ota/dist/
+.env
+.env.*
+!.env.example
 handover_notes.md
 
 # --- Development Tools ---

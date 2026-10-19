@@ -44,10 +44,14 @@ import sys
 import termios
 import warnings
 import signal
+import uuid
+from ota.health import Health
+from ota.core import sync_directory
 warnings.filterwarnings("ignore", category=UserWarning,
                         module="google.protobuf")
 
 main_path = os.path.dirname(__file__)
+APP_HEALTH = Health()
 
 
 def check_empty_string_in_dict(data):
@@ -177,10 +181,15 @@ class CameraSystem:
     def main_camera(self):
         frame_count = 0
         while not self.stop_threads:
+            if getattr(self.system, "health", None) is not None:
+                self.system.health.pulse(f"capture:{self.frame_num}")
             original_frame = self.camera.read()
             if original_frame is None or original_frame.size == 0:
                 time.sleep(0.01)
                 continue
+
+            if getattr(self.system, "health", None) is not None:
+                self.system.health.pulse(f"frame:{self.frame_num}")
 
             # 更新 AI 與存檔用的原圖
             self.system.state.frame[self.frame_num] = original_frame
@@ -686,6 +695,8 @@ class GlobalState:
 
 class FaceRecognitionSystem:
     def __init__(self):
+        self.health = APP_HEALTH
+        self.health.set(config=True)
         self.n_camera = 2
         self.state = GlobalState()
         self.state.max_box = [None] * self.n_camera
@@ -726,6 +737,8 @@ class FaceRecognitionSystem:
         # [2026-02-09 Fix] 使用動態載入方法，支援熱更新
         if CONFIG.get("Clothes_show", False) or CONFIG.get("Clothes_detection", False):
             self.load_clothes_model()
+        self.health.set(models=not (CONFIG.get("Clothes_show", False) or CONFIG.get("Clothes_detection", False))
+                        or getattr(self, "model_clothes", None) is not None)
 
         self.speaker = Say_()
         self.local_media_path = os.path.join(
@@ -734,6 +747,7 @@ class FaceRecognitionSystem:
         for d in ["descriptors", "pic_bak"]:
             os.makedirs(os.path.join(self.local_media_path, d), exist_ok=True)
         self.update_lock = threading.Lock()
+        self._face_sync_requested = threading.Event()
 
         # [2026-01-13 Perf] Thread pool for non-blocking I/O (e.g., image saving)
         self.io_pool = ThreadPoolExecutor(max_workers=2)
@@ -796,6 +810,10 @@ class FaceRecognitionSystem:
             return False
 
     def _rebuild_assets(self, force_voice=False):
+        with self.update_lock:
+            return self._rebuild_assets_locked(force_voice)
+
+    def _rebuild_assets_locked(self, force_voice=False):
         """[2026-04-24 Offline Resilience] Non-blocking, offline-safe asset rebuild.
         Skips rsync if no network. Uses incremental voice rebuild (no rmtree).
         Falls back to existing local data when offline."""
@@ -818,8 +836,6 @@ class FaceRecognitionSystem:
         self._incremental_voice_rebuild(force=force_voice)
 
         # 2. Descriptors (CPU Bound) - Run SECOND
-        if os.path.exists(dp):
-            shutil.rmtree(dp)
         os.makedirs(dp, exist_ok=True)
 
         if os.path.isdir(pb):
@@ -828,26 +844,8 @@ class FaceRecognitionSystem:
             if pic_files:
                 LOGGER.info(
                     f"Stage 2/2: Rebuilding descriptors for {len(pic_files)} images...")
-                # [2026-01-24 Fix] 改用 MediaPipe，與辨識端保持一致
-                from init.mediapipe_handler import MediaPipeHandler
-                mp_handler = MediaPipeHandler(
-                    static_image_mode=True, max_num_faces=1)
-                try:
-                    for f in tqdm(pic_files, desc="[Descriptor Gen]"):
-                        try:
-                            img_pil = Image.open(
-                                os.path.join(pb, f)).convert('RGB')
-                            img_np = np.array(img_pil)
-                            boxes, _, points = mp_handler.detect(img_np)
-                            if boxes is not None:
-                                emb = self.resnet(crop_face_without_forehead(
-                                    img_pil, boxes[0], points[0]).unsqueeze(0))
-                                np.save(os.path.join(
-                                    dp, f"{os.path.splitext(f)[0]}.npy"), emb[0].detach().numpy())
-                        except Exception:
-                            pass
-                finally:
-                    mp_handler.close()
+                # Keep known-good descriptors until replacements have been written.
+                self._generate_new_descriptors(pic_files, pb, dp)
 
             # [2026-01-24 Fix] Force delete stale index to ensure rebuild from new descriptors
             index_path = os.path.join(self.local_media_path, "faiss.index")
@@ -936,9 +934,9 @@ class FaceRecognitionSystem:
 
         def gen_one_voice(filename, text):
             target = os.path.join(vp, filename)
-            tmp_target = f"{target}.{os.getpid()}.tmp"
+            tmp_target = f"{target}.{uuid.uuid4().hex}.tmp"
             try:
-                tts = gTTS(text=text, lang='zh-tw')
+                tts = gTTS(text=text, lang='zh-tw', timeout=10)
                 tts.save(tmp_target)
                 os.replace(tmp_target, target)
                 return True
@@ -990,6 +988,16 @@ class FaceRecognitionSystem:
         self.state.comparison_interval = max(0.10, min(0.5, rt * 1.5))
         LOGGER.info(
             f"Auto-Tuning: Det {1/self.state.detection_interval:.1f} FPS, Rec {1/self.state.comparison_interval:.1f} FPS")
+        with torch.no_grad():
+            embedding = self.resnet(torch.zeros(1, 3, 160, 160))
+        if embedding.shape != (1, 512) or not torch.isfinite(embedding).all():
+            raise RuntimeError("Inference health check failed")
+        if self.state.ann_index.index is not None and self.state.ann_index.index.ntotal:
+            distances, person_ids = self.state.ann_index.search(embedding[0].detach().numpy(), k=1)
+            if distances is None or not person_ids or not np.isfinite(distances).all():
+                raise RuntimeError("Recognition index health check failed")
+        mp.close()
+        self.health.set(inference=True)
 
     def run(self):
         # [2026-01-19 Fix TTY] Backup terminal settings at startup
@@ -999,6 +1007,10 @@ class FaceRecognitionSystem:
             self.original_tty_settings = None
 
         app = QApplication(sys.argv)
+        self.health.start(int(os.environ.get("FACIAL_OTA_HEALTH_PORT", "8765")))
+        self._health_timer = QTimer()
+        self._health_timer.timeout.connect(lambda: self.health.pulse("gui"))
+        self._health_timer.start(1000)
 
         # [2026-01-30 Feature] Apply Global Theme
         try:
@@ -1100,31 +1112,68 @@ class FaceRecognitionSystem:
         self.mqtt_client = client
         client.on_connect = self.on_mqtt_connect
         client.on_message = self.on_mqtt_message
+        client.on_subscribe = self.on_mqtt_subscribe
+        client.on_disconnect = self.on_mqtt_disconnect
+        self.health.set(mqtt_connected=False, mqtt_subscribed=False, sync=False)
+        self._network_tasks_done["mqtt"] = False
         try:
             client.connect(self.mqtt_broker_host, self.mqtt_port, 60)
             client.loop_start()
-            self._network_tasks_done["mqtt"] = True
-            LOGGER.info("MQTT connected successfully.")
+            LOGGER.info("MQTT connection requested; waiting for broker acknowledgement.")
         except Exception as e:
             LOGGER.warning(f"MQTT connection failed: {e}. Will retry in background.")
 
     def on_mqtt_connect(self, client, userdata, flags, rc, properties=None):
-        if rc == 0:
+        if client is self.mqtt_client and rc == 0:
+            self.health.set(mqtt_connected=True)
             client.subscribe(self.mqtt_topic)
-            self.update_data_and_model(initial_run=True)
+            self._request_face_sync()
+
+    def on_mqtt_subscribe(self, client, userdata, mid, reason_codes, properties=None):
+        if client is not self.mqtt_client:
+            return
+        accepted = bool(reason_codes) and all(code in (0, 1, 2) for code in reason_codes)
+        self._network_tasks_done["mqtt"] = accepted
+        self.health.set(mqtt_subscribed=accepted)
+
+    def on_mqtt_disconnect(self, client, userdata, flags, reason_code, properties=None):
+        if client is self.mqtt_client:
+            self._network_tasks_done["mqtt"] = False
+            self.health.set(mqtt_connected=False, mqtt_subscribed=False, sync=False)
+            self._start_network_retry_loop()
+
+    def _request_face_sync(self):
+        self._face_sync_requested.set()
+        if hasattr(self, "_face_sync_thread") and self._face_sync_thread.is_alive():
+            return
+
+        def worker():
+            while not self._shutdown_flag:
+                if not self._face_sync_requested.wait(1):
+                    continue
+                self._face_sync_requested.clear()
+                if not self.update_data_and_model(initial_run=True):
+                    for _ in range(15):
+                        if self._shutdown_flag:
+                            return
+                        time.sleep(1)
+                    self._face_sync_requested.set()
+
+        self._face_sync_thread = threading.Thread(target=worker, daemon=True, name="mqtt-face-sync")
+        self._face_sync_thread.start()
 
     def on_mqtt_message(self, client, userdata, msg):
-        try:
-            self.update_data_and_model(initial_run=False)
-        except Exception:
-            pass
+        if client is self.mqtt_client:
+            self._request_face_sync()
 
     def update_data_and_model(self, initial_run=True):
         if not self.update_lock.acquire(blocking=False):
-            return
+            return False
+        self.health.set(sync=False)
+        self._network_tasks_done["sync"] = False
         try:
             if not self._sync_files_with_server():
-                return
+                return False
             pb, dp = os.path.join(self.local_media_path, "pic_bak"), os.path.join(
                 self.local_media_path, "descriptors")
             pic_map = {os.path.splitext(f)[0]: f for f in os.listdir(
@@ -1140,12 +1189,22 @@ class FaceRecognitionSystem:
                         os.remove(os.path.join(dp, f))
                     except Exception:
                         pass
-                self._generate_new_descriptors(new_files, pb, dp)
+                descriptors_ok = self._generate_new_descriptors(new_files, pb, dp)
+                self.health.set(index=False)
                 f, _, _, _, _ = self._load_features_from_disk()
                 self.state.features_dict = f
                 self._update_profile_dict()
                 self._load_or_build_index(force_rebuild=True)
+                self.health.set(index=True)
                 self._incremental_voice_rebuild()
+                if not descriptors_ok:
+                    return False
+            self._network_tasks_done["sync"] = True
+            self.health.set(sync=True)
+            return True
+        except Exception:
+            LOGGER.exception("Face synchronization failed; pending retry.")
+            return False
         finally:
             self.update_lock.release()
 
@@ -1168,21 +1227,41 @@ class FaceRecognitionSystem:
         # [2026-01-24 Fix] 改用 MediaPipe，與辨識端保持一致
         from init.mediapipe_handler import MediaPipeHandler
         mp_handler = MediaPipeHandler(static_image_mode=True, max_num_faces=1)
+        success = True
         try:
             for f in tqdm(new_files, desc="[1/2] Descriptor Generation"):
                 try:
+                    target = os.path.join(dp, f"{os.path.splitext(f)[0]}.npy")
+                    if os.path.exists(target) and os.path.getmtime(target) >= os.path.getmtime(os.path.join(pb, f)):
+                        continue
                     img_pil = Image.open(os.path.join(pb, f)).convert('RGB')
                     img_np = np.array(img_pil)
                     boxes, _, points = mp_handler.detect(img_np)
                     if boxes is not None:
                         emb = self.resnet(crop_face_without_forehead(
                             img_pil, boxes[0], points[0]).unsqueeze(0))
-                        np.save(os.path.join(
-                            dp, f"{os.path.splitext(f)[0]}.npy"), emb[0].detach().numpy())
+                        vector = emb[0].detach().numpy()
+                        if vector.shape != (512,) or not np.isfinite(vector).all():
+                            raise ValueError("Invalid descriptor embedding")
+                        temporary = target + "." + uuid.uuid4().hex + ".tmp"
+                        try:
+                            with open(temporary, "xb") as output:
+                                np.save(output, vector, allow_pickle=False)
+                                output.flush()
+                                os.fsync(output.fileno())
+                            os.replace(temporary, target)
+                            sync_directory(dp)
+                        finally:
+                            if os.path.exists(temporary):
+                                os.remove(temporary)
+                    else:
+                        success = False
                 except Exception:
-                    pass
+                    success = False
+                    LOGGER.exception("Descriptor generation failed; existing data retained.")
         finally:
             mp_handler.close()
+        return success
 
     def _load_features_from_disk(self):
         dp = os.path.join(self.local_media_path, "descriptors")
@@ -1203,11 +1282,13 @@ class FaceRecognitionSystem:
         return feat, xt, yt, xv, yv
 
     def _load_features_and_profiles(self):
+        self.health.set(index=False)
         try:
             f, _, _, _, _ = self._load_features_from_disk()
             self.state.features_dict = f
             self._update_profile_dict()
             self._load_or_build_index(force_rebuild=False)
+            self.health.set(index=True)
             # [2026-02-01 Optimization] Disable unused Part Feature Generation to speed up startup
             # self._load_part_features()
         except Exception as e:
@@ -1335,6 +1416,7 @@ class FaceRecognitionSystem:
 
         self.cameras = [CameraSystem(ip, i, n, self, CONFIG)
                         for i, ip in target_source if ip != "0"]
+        self.health.cameras = [cam.frame_num for cam in self.cameras if not CONFIG[CAMERA[cam.frame_num]].get("close", False)]
 
         for cam in self.cameras:
             if CONFIG.get("full_screen", False):
@@ -1538,14 +1620,8 @@ class FaceRecognitionSystem:
                 # Task 1: Sync files with server
                 if not self._network_tasks_done["sync"]:
                     try:
-                        if self._sync_files_with_server():
-                            self._network_tasks_done["sync"] = True
+                        if self.update_data_and_model(initial_run=True):
                             LOGGER.info("[Retry] Server sync completed.")
-                            # After sync, rebuild descriptors incrementally
-                            try:
-                                self.update_data_and_model(initial_run=True)
-                            except Exception as e:
-                                LOGGER.error(f"[Retry] Incremental model update failed: {e}")
                         else:
                             LOGGER.warning("[Retry] Server sync failed, will retry.")
                     except Exception as e:
@@ -1554,7 +1630,8 @@ class FaceRecognitionSystem:
                 # Task 2: Voice files
                 if not self._network_tasks_done["voice"]:
                     try:
-                        self._incremental_voice_rebuild()
+                        with self.update_lock:
+                            self._incremental_voice_rebuild()
                     except Exception as e:
                         LOGGER.error(f"[Retry] Voice rebuild failed: {e}")
 

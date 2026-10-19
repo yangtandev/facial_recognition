@@ -1,0 +1,24 @@
+{
+  "device_id": "CHANGE_ME_DEVICE_UUID",
+  "role": "test",
+  "repo": "yangtandev/facial_recognition",
+  "github_token": "",
+  "smtp": {
+    "host": "CHANGE_ME_SMTP_HOST",
+    "port": 587,
+    "tls": "starttls",
+    "username": "",
+    "password": "",
+    "from": "ota@example.com",
+    "to": ["admin@example.com"]
+  },
+  "state_dir": "/home/ubuntu/.local/share/facial-ota",
+  "shared_dir": "/home/ubuntu/facial_recognition",
+  "python": "/usr/bin/python3",
+  "health_port": 8765,
+  "poll_seconds": 300,
+  "startup_timeout": 180,
+  "stable_seconds": 60,
+  "alert_grace_seconds": 300,
+  "keep_releases": 2
+}
