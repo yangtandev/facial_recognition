@@ -1,5 +1,12 @@
 # Release Notes
 
+## v1.4.0-rc.2 - 2026-10-22
+
+- 新增一次指令接入 OTA，自動準備版本、備份設定、健康驗收及失敗還原。
+- 支援共用部署設定與 SMTP／GitHub token 熱重載，保留各機識別與現場設定。
+- 本候選套件採 Python 3.12、Linux x86_64 與 CPU 版 PyTorch／Torchvision，保留 OpenVINO。
+- CPU 環境通過離線依賴、核心套件、NMS 運算與 137 項 OTA 自動測試；現場業務驗收尚待完成。
+
 ## v1.4.0-rc.1 - 2026-10-19
 
 - 新增主機主動查詢 GitHub Release 的 OTA 更新，測試機接收 RC／正式版，正式機僅接收正式版。
