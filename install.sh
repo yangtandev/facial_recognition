@@ -4,11 +4,11 @@ set -e
 # 初次安裝與既有主機共用 OTA/SMTP 設定入口；設定階段不改辨識 config。
 PROJECT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 cd "$PROJECT_DIR"
-if [ "${1:-}" != "" ] && [ "${1:-}" != "--ota-config-only" ] && [ "${1:-}" != "--ota-setup" ] && [ "${1:-}" != "--ota-status" ]; then
-    echo "用法: bash install.sh [--ota-config-only|--ota-setup|--ota-status]"
+if [ "${1:-}" != "" ] && [ "${1:-}" != "--ota-config-only" ] && [ "${1:-}" != "--ota-setup" ] && [ "${1:-}" != "--ota-status" ] && [ "${1:-}" != "--preflight" ] && [ "${1:-}" != "--ota-check" ]; then
+    echo "用法: bash install.sh [--preflight|--ota-config-only|--ota-setup|--ota-status|--ota-check]"
     exit 1
 fi
-if [ "${1:-}" = "--ota-setup" ] || [ "${1:-}" = "--ota-status" ]; then
+if [ "${1:-}" = "--ota-setup" ] || [ "${1:-}" = "--ota-status" ] || [ "${1:-}" = "--preflight" ] || [ "${1:-}" = "--ota-check" ]; then
     OTA_PYTHON_CMD=""
     for OTA_CANDIDATE in python3 python3.10 python3.11 python3.12 python3.13; do
         if command -v "$OTA_CANDIDATE" >/dev/null 2>&1 && "$OTA_CANDIDATE" -c 'import sys; exit(0 if sys.version_info >= (3, 10) else 1)'; then
@@ -19,6 +19,12 @@ if [ "${1:-}" = "--ota-setup" ] || [ "${1:-}" = "--ota-status" ]; then
     if [ -z "$OTA_PYTHON_CMD" ]; then
         echo "OTA 需要已安裝的 Python 3.10+ 與相符 venv 支援；原辨識服務未變更。"
         exit 1
+    fi
+    if [ "${1:-}" = "--preflight" ]; then
+        exec "$OTA_PYTHON_CMD" -m ota.diagnostics preflight --project "$PROJECT_DIR" "${@:2}"
+    fi
+    if [ "${1:-}" = "--ota-check" ]; then
+        exec "$OTA_PYTHON_CMD" -m ota.diagnostics check --project "$PROJECT_DIR" "${@:2}"
     fi
     if [ "${1:-}" = "--ota-status" ]; then
         exec "$OTA_PYTHON_CMD" -m ota.setup --status --project "$PROJECT_DIR" "${@:2}"
