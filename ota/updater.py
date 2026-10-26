@@ -111,6 +111,92 @@ class Agent:
         version_key(info["version"])
         return path, info
 
+    def waiting(self):
+        return self.store.get("waiting_enrollment") if not (self.root / "current").is_symlink() else None
+
+    def check_waiting(self):
+        waiting = self.waiting()
+        if not waiting or self.config["role"] != "production":
+            raise ValueError("Owned production waiting enrollment required")
+        pid = int(systemctl("show", self.service, "--property=MainPID", "--value"))
+        working = Path(systemctl("show", self.service, "--property=WorkingDirectory", "--value")).resolve()
+        if pid <= 0 or systemctl("is-active", self.service) != "active" or str(working) != waiting["working_dir"]:
+            raise RuntimeError("Original waiting recognition service is unavailable or changed")
+        try:
+            value = health(self.port)
+        except (OSError, ValueError):
+            # Truly old installations have no health API. Do not fabricate build identity
+            # or claim functional health; monitor only the original systemd process.
+            return {"pid": pid, "core_ok": True, "external_ok": True, "healthy": None,
+                    "legacy_process_only": True}
+        if value.get("pid") != pid:
+            raise RuntimeError("Waiting health PID does not match the original service")
+        return value
+
+    def poll_record(self, value, action, **fields):
+        value = {**value, **fields, "action": action}
+        self.store.set("last_poll", value)
+        print("OTA poll:", json.dumps(value, ensure_ascii=False), flush=True)
+        return value
+
+    def discover(self):
+        try:
+            releases = self.releases()
+        except Exception as error:
+            self.poll_record({"checked_at": timestamp(), "query_ok": False,
+                              "error_type": type(error).__name__}, "query_failed")
+            raise
+        skipped = []
+        if self.config["role"] == "production":
+            for release in releases:
+                try:
+                    if not release.get("draft") and not version_key(release["tag_name"])[3]:
+                        skipped.append(release["tag_name"])
+                except (TypeError, KeyError, ValueError):
+                    pass
+        summary = {"checked_at": timestamp(), "query_ok": True, "role": self.config["role"],
+                   "rc_skipped": skipped[:20], "rc_skipped_count": len(skipped)}
+        return releases, summary
+
+    def poll_enrollment(self):
+        # The separate worker may replace agent files/units, never this running poll.
+        from ota.setup import SERVICE, active, launch
+        if active(SERVICE):
+            return
+        waiting = self.waiting()
+        self.check_waiting()
+        identity = self.identity()
+        if identity["project"] == "unknown":
+            raise ValueError("Cannot determine project from the current site configuration")
+        releases, summary = self.discover()
+        baseline = waiting["version"] if waiting["version"] != "legacy" else "v0.0.0"
+        retry = self.store.get("retry", "")
+        failed = self.store.failed() - {retry}
+        if retry:
+            releases = [release for release in releases if release.get("tag_name") == retry]
+        while candidate := select_release(releases, "production", "v0.0.0", failed):
+            if version_key(candidate["tag_name"]) < version_key(baseline):
+                releases.remove(candidate)
+                continue
+            try:
+                manifest = self.manifest(candidate)
+                if "*" not in manifest["projects"] and identity["project"] not in manifest["projects"]:
+                    releases.remove(candidate)
+                    continue
+                self.poll_record(summary, "enrollment_requested", selected_version=candidate["tag_name"])
+                launch(self.shared, self.root / "agent.json", automatic=True, version=candidate["tag_name"])
+                if retry:
+                    self.store.set("retry", "")
+            except BlockingIOError:
+                self.poll_record(summary, "setup_busy")
+            except (OSError, ValueError, RuntimeError, KeyError, TypeError, subprocess.SubprocessError) as error:
+                self.store.record(str(uuid.uuid4()), "failed", {"operation": "enrollment",
+                    "from_version": waiting["version"], "target_version": candidate["tag_name"],
+                    "running_version": waiting["version"], "rollback": "not_needed", "error": error_summary(error)}, identity)
+                self.poll_record(summary, "enrollment_failed", selected_version=candidate["tag_name"])
+            return
+        self.poll_record(summary, "waiting_release")
+
     def check(self, info):
         value = health(self.port)
         pid = int(systemctl("show", self.service, "--property=MainPID", "--value"))
@@ -463,6 +549,10 @@ class Agent:
             self.recover()
             if self.store.get("blocked") or self.config["role"] == "development":
                 return
+            if self.waiting():
+                if time.time() >= self.store.get("poll_after", 0):
+                    self.poll_enrollment()
+                return
             try:
                 self.cleanup()
             except Exception as error:
@@ -470,7 +560,7 @@ class Agent:
             if time.time() < self.store.get("poll_after", 0):
                 return
             _, info = self.current()
-            releases = self.releases()
+            releases, poll = self.discover()
             retry = self.store.get("retry", "")
             failed = self.store.failed() - {retry}
             if retry:
@@ -488,13 +578,17 @@ class Agent:
                         "from_version": info["version"], "target_version": candidate["tag_name"],
                         "running_version": info["version"], "error": error_summary(error),
                         "rollback": "not_needed", "service_healthy": baseline_healthy}, identity)
+                    self.poll_record(poll, "manifest_failed", selected_version=candidate["tag_name"])
                     break
                 if "*" in manifest["projects"] or identity["project"] in manifest["projects"]:
+                    self.poll_record(poll, "update_selected", selected_version=candidate["tag_name"])
                     if candidate["tag_name"] == retry:
                         self.store.set("retry", "")
                     self.update(candidate, manifest)
                     break
                 releases.remove(candidate)
+            else:
+                self.poll_record(poll, "no_update")
 
     def notify_once(self):
         if self.config["role"] == "development":
@@ -513,8 +607,12 @@ class Agent:
             return
         failures = {}
         try:
-            _, info = self.current()
-            status = self.check(info)
+            if self.waiting():
+                status = self.check_waiting()
+                info = {"version": self.waiting()["version"]}
+            else:
+                _, info = self.current()
+                status = self.check(info)
             if status.get("core_ok") is not True:
                 failures["core"] = "Core health validation failed"
             if status.get("camera_ok") is False:
@@ -532,7 +630,7 @@ class Agent:
 
     def setup_pending(self):
         path = self.root / "setup.json"
-        return path.is_file() and read_json(path).get("phase") not in ("complete", "failed", "rollback_failed")
+        return path.is_file() and read_json(path).get("phase") not in ("complete", "waiting_release", "failed", "rollback_failed")
 
     def status(self):
         try:
@@ -544,6 +642,8 @@ class Agent:
         return {"selected_build": selected, "setup": {key: setup[key] for key in
                 ("phase", "target_version", "error", "rollback", "rollback_error", "backup_dir") if key in setup},
                 "pending": self.store.outstanding(), "latest_update": self.store.latest_summary(),
+                "enrollment_state": "waiting_release" if self.waiting() else ("managed" if selected else "not_enrolled"),
+                "last_poll": self.store.get("last_poll"),
                 "last_health": self.store.get("last_health"), "cleanup_error": self.store.get("cleanup_error"),
                 "blocked": self.store.get("blocked", False)}
 
@@ -599,14 +699,17 @@ def main():
     elif args.action == "retry":
         with file_lock(agent.root / "update.lock", blocking=False):
             key = version_key(args.version)
+            waiting = agent.waiting()
+            baseline = (waiting["version"] if waiting["version"] != "legacy" else "v0.0.0") if waiting else agent.current()[1]["version"]
             if (not args.version.startswith("v") or args.version not in agent.store.failed()
-                    or key <= version_key(agent.current()[1]["version"])
+                    or (key < version_key(baseline) if waiting else key <= version_key(baseline))
                     or agent.config["role"] == "production" and not key[3]):
-                raise ValueError("Retry requires a failed, newer, role-eligible published version")
+                raise ValueError("Retry requires a failed, non-downgrading, role-eligible published version")
             agent.store.set("retry", args.version)
     elif args.action == "resume":
         with file_lock(agent.root / "update.lock", blocking=False):
-            if not update_ready(agent.check(agent.current()[1])):
+            status = agent.check_waiting() if agent.waiting() else agent.check(agent.current()[1])
+            if not update_ready(status) and not status.get("legacy_process_only"):
                 raise RuntimeError("Repair and validate service before resuming")
             agent.store.set("blocked", False)
     elif args.action in ("once", "notify-once"):

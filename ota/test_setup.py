@@ -51,6 +51,9 @@ class SetupTests(unittest.TestCase):
         self.stack.enter_context(patch("ota.setup.Path.home", return_value=self.root))
         self.stack.enter_context(patch("ota.setup.systemctl", side_effect=self.control))
         self.stack.enter_context(patch("ota.install_agent.systemctl", side_effect=self.control))
+        self.stack.enter_context(patch("ota.updater.systemctl", side_effect=self.control))
+        self.stack.enter_context(patch("ota.updater.health", return_value={"pid": 123, "healthy": True,
+            "core_ok": True, "external_ok": True, "camera_ok": True, "update_ready": True}))
         self.stack.enter_context(patch("ota.updater.Agent.identity", return_value={
             "device_id": self.config["device_id"], "role": "test", "project": "project", "location": "測試閘道"}))
         self.stack.enter_context(patch("ota.updater.Agent.releases", return_value=[
@@ -141,11 +144,307 @@ class SetupTests(unittest.TestCase):
         self.config["role"] = "production"
         atomic_json(self.source, self.config)
         setup = self.start()
-        self.assertFalse(setup.run())
+        self.assertTrue(setup.run())
         self.assertEqual(self.site, read_json(self.shared / "config.json"))
         self.assertNotIn(("stop", "facial_recognition.service"), self.calls)
         self.assertFalse((self.state / "current").exists())
+        self.assertEqual([], self.sent)
+        self.assertEqual("waiting_release", setup.data["phase"])
+        self.assertTrue(setup.agent.store.get("waiting_enrollment"))
+        self.assertTrue(self.running["facial-ota-poll.service"])
+        self.assertTrue(self.running["facial-ota-notify.service"])
+
+    def waiting(self):
+        self.config["role"] = "production"
+        atomic_json(self.source, self.config)
+        setup = self.start()
+        self.assertTrue(setup.run())
+        self.running[SERVICE] = False  # The independent worker returned/exited.
+        return setup
+
+    def stable(self):
+        self.info["version"] = "v1.4.0"
+        atomic_json(self.new / "BUILD_INFO.json", self.info)
+        self.stack.enter_context(patch("ota.updater.Agent.releases", return_value=[
+            {"tag_name": "v1.4.0", "prerelease": False, "draft": False}]))
+        self.stack.enter_context(patch("ota.updater.Agent.manifest", return_value={**self.info, "projects": ["project"]}))
+
+    def test_waiting_registration_does_not_need_github_or_create_fake_release_identity(self):
+        with patch("ota.updater.Agent.releases", side_effect=OSError("offline")) as releases:
+            setup = self.waiting()
+        releases.assert_not_called()
+        self.assertFalse((self.shared / "BUILD_INFO.json").exists())
+        self.assertFalse(setup.targets["override"].exists())
+        self.assertEqual({}, setup.agent.store.latest_summary())
+        self.assertEqual(0, setup.agent.store.outstanding())
+        self.assertEqual(0o600, (self.state / "agent.json").stat().st_mode & 0o777)
+
+    def test_waiting_poll_records_rc_skip_without_manifest_download_or_service_switch(self):
+        setup = self.waiting()
+        self.calls.clear()
+        with patch("ota.updater.Agent.manifest") as manifest, patch("ota.updater.Agent.stage") as stage:
+            setup.agent.once()
+        manifest.assert_not_called()
+        stage.assert_not_called()
+        result = setup.agent.status()
+        self.assertEqual("waiting_release", result["enrollment_state"])
+        self.assertTrue(result["last_poll"]["query_ok"])
+        self.assertEqual(["v1.4.0-rc.2"], result["last_poll"]["rc_skipped"])
+        self.assertEqual("waiting_release", result["last_poll"]["action"])
+        self.assertNotIn(("stop", "facial_recognition.service"), self.calls)
+        self.assertEqual(self.site, read_json(self.shared / "config.json"))
+        self.assertEqual(0, setup.agent.store.outstanding())
+
+    def test_waiting_ignores_drafts_rc_flag_mismatches_and_wrong_projects(self):
+        setup = self.waiting()
+        releases = [{"tag_name": tag, "prerelease": pre, "draft": draft} for tag, pre, draft in (
+            ("v1.4.0-rc.9", False, False), ("v1.4.0", True, False), ("v1.4.1", False, True), ("v1.3.9", False, False))]
+        with patch("ota.updater.Agent.releases", return_value=releases), \
+             patch("ota.updater.Agent.manifest", return_value={"projects": ["another-project"]}) as manifest:
+            setup.agent.once()
+        self.assertEqual(1, manifest.call_count)
+        self.assertEqual("waiting_release", setup.agent.store.get("last_poll")["action"])
+        self.assertEqual(0, setup.agent.store.outstanding())
+
+    def test_waiting_query_failure_is_not_an_update_failure_and_leaves_service_running(self):
+        setup = self.waiting()
+        with patch("ota.updater.Agent.releases", side_effect=OSError("do-not-print-secret-url")), self.assertRaises(OSError):
+            setup.agent.once()
+        result = setup.agent.store.get("last_poll")
+        self.assertFalse(result["query_ok"])
+        self.assertEqual("query_failed", result["action"])
+        self.assertNotIn("secret", json.dumps(result))
+        self.assertEqual(0, setup.agent.store.outstanding())
+        self.assertTrue(self.running["facial_recognition.service"])
+
+    def test_waiting_monitor_does_not_report_absent_baseline_as_core_failure(self):
+        setup = self.waiting()
+        setup.agent.notify_once()
+        self.assertEqual({}, setup.agent.store.get("incidents", {}))
+        with patch("ota.updater.health", side_effect=OSError("legacy endpoint absent")):
+            setup.agent.notify_once()
+        self.assertTrue(setup.agent.store.get("last_health")["legacy_process_only"])
+        self.assertEqual({}, setup.agent.store.get("incidents", {}))
+        self.assertEqual([], self.sent)
+
+    def test_waiting_camera_disconnect_is_not_an_update_failure(self):
+        setup = self.waiting()
+        with patch("ota.updater.health", return_value={"pid": 123, "core_ok": True,
+                "external_ok": True, "camera_ok": False, "healthy": False, "update_ready": True,
+                "cameras": {"0": False}}):
+            setup.agent.notify_once()
+            setup.agent.once()
+        self.assertEqual({"camera"}, set(setup.agent.store.get("incidents")))
+        self.assertEqual(0, setup.agent.store.outstanding())
+        self.assertNotIn(("stop", "facial_recognition.service"), self.calls)
+        setup.agent.notify_once()
+        self.assertEqual({}, setup.agent.store.get("incidents"))
+
+    def test_first_formal_release_is_dispatched_to_independent_worker_and_enrolled(self):
+        setup = self.waiting()
+        self.stable()
+        setup.agent.once()
+        data = read_json(self.state / "setup.json")
+        self.assertEqual("requested", data["phase"])
+        self.assertTrue(data["automatic"])
+        self.assertEqual("v1.4.0", data["requested_version"])
+        self.assertFalse((self.state / "current").exists())
+        self.assertTrue(self.worker().run())
+        self.assertEqual(self.new, (self.state / "current").resolve())
+        self.assertIsNone(setup.agent.store.get("waiting_enrollment"))
+        self.assertEqual("success", setup.agent.store.latest_summary()["phase"])
+        self.assertEqual(self.site["Server"], read_json(self.shared / "config.json")["Server"])
+        self.assertTrue(self.running["facial-ota-poll.service"])
+        self.assertTrue(self.running["facial-ota-notify.service"])
+        self.assertEqual([], self.sent)
+
+    def test_first_formal_failure_restores_original_and_waiting_workers_without_retry_loop(self):
+        setup = self.waiting()
+        self.stable()
+        setup.agent.once()
+        self.new_failure = True
+        self.assertFalse(self.worker().run())
+        self.running[SERVICE] = False
+        self.assertEqual(self.shared, self.working())
+        self.assertFalse((self.state / "current").exists())
+        self.assertTrue(setup.agent.store.get("waiting_enrollment"))
+        self.assertTrue(self.running["facial-ota-poll.service"])
+        self.assertTrue(self.running["facial-ota-notify.service"])
+        before = read_json(self.state / "setup.json")
+        setup.agent.once()
+        self.assertEqual(before, read_json(self.state / "setup.json"))
+        self.assertEqual(1, setup.agent.store.outstanding())
+        setup.agent.notify_once()
         self.assertEqual(1, len(self.sent))
+        self.assertEqual("restored_unverified", self.sent[0][1]["rollback"])
+        self.assertIn("failed_at", self.sent[0][1])
+
+    def test_failed_manifest_is_reported_once_without_stopping_original_service(self):
+        setup = self.waiting()
+        self.stable()
+        with patch("ota.updater.Agent.manifest", side_effect=ValueError("bad manifest")) as manifest:
+            setup.agent.once()
+            setup.agent.once()
+        self.assertEqual(1, manifest.call_count)
+        self.assertEqual(1, setup.agent.store.outstanding())
+        self.assertEqual(self.shared, self.working())
+
+    def test_interrupted_first_formal_install_restores_waiting_registration(self):
+        setup = self.waiting()
+        self.stable()
+        setup.agent.once()
+        with patch("ota.setup.install", side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
+            self.worker().run()
+        self.assertFalse(self.worker().run())
+        self.assertEqual(self.shared, self.working())
+        self.assertTrue(setup.agent.waiting())
+        self.assertTrue(self.running["facial-ota-poll.service"])
+        self.assertEqual(self.site, read_json(self.shared / "config.json"))
+
+    def test_waiting_rerun_updates_tools_without_reinstalling_or_stopping_app(self):
+        self.waiting()
+        self.calls.clear()
+        self.assertTrue(self.start().run())
+        self.assertNotIn(("stop", "facial_recognition.service"), self.calls)
+        self.assertEqual(self.config["device_id"], read_json(self.state / "agent.json")["device_id"])
+        self.assertEqual(self.site, read_json(self.shared / "config.json"))
+
+    def test_waiting_unit_files_are_valid_and_private(self):
+        setup = self.waiting()
+        units = [setup.targets[name] for name in ("poll", "notify")]
+        result = subprocess.run(["systemd-analyze", "--user", "verify", *(str(unit) for unit in units)],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(0, result.returncode, result.stderr)
+        for unit in units:
+            self.assertEqual(0o600, unit.stat().st_mode & 0o777)
+
+    def test_manual_waiting_unit_changes_are_not_overwritten(self):
+        setup = self.waiting()
+        path = setup.targets["poll"]
+        path.write_text(path.read_text() + "\n# manual settings\n")
+        before = path.read_bytes()
+        self.assertFalse(self.start().run())
+        self.assertEqual(before, path.read_bytes())
+        self.assertEqual(self.shared, self.working())
+
+    def test_first_same_version_may_be_adopted_but_older_releases_are_not_downloaded(self):
+        self.stable()
+        atomic_json(self.shared / "BUILD_INFO.json", self.info)
+        setup = self.waiting()
+        with patch("ota.updater.Agent.releases", return_value=[{"tag_name": "v1.3.9", "draft": False, "prerelease": False}]), \
+             patch("ota.updater.Agent.manifest") as manifest:
+            setup.agent.once()
+        manifest.assert_not_called()
+        setup.agent.once()
+        self.assertEqual("requested", read_json(self.state / "setup.json")["phase"])
+        self.assertTrue(self.worker().run())
+
+    def test_waiting_explicit_retry_can_recover_after_host_problem_is_repaired(self):
+        from ota.updater import main
+        setup = self.waiting()
+        self.stable()
+        setup.agent.once()
+        self.new_failure = True
+        self.assertFalse(self.worker().run())
+        self.running[SERVICE] = False
+        self.new_failure = False
+        with patch("sys.argv", ["updater", "--config", str(self.state / "agent.json"), "retry", "--version", "v1.4.0"]):
+            main()
+        setup.agent.once()
+        self.assertTrue(self.worker().run())
+        self.assertEqual("", setup.agent.store.get("retry"))
+
+    def test_waiting_role_change_does_not_bypass_stable_only_policy(self):
+        setup = self.waiting()
+        setup.agent.config["role"] = "test"
+        with self.assertRaises(ValueError):
+            setup.agent.once()
+        self.assertFalse((self.state / "current").exists())
+
+    def test_smtp_outage_does_not_keep_setup_active_or_block_later_stable_release(self):
+        setup = self.waiting()
+        self.stable()
+        setup.agent.once()
+        self.new_failure = True
+        self.assertFalse(self.worker().run())
+        self.running[SERVICE] = False
+        with patch("ota.notifications.send_mail", side_effect=OSError("SMTP unavailable")):
+            setup.agent.notify_once()
+        self.assertEqual(1, setup.agent.store.outstanding())
+        with patch("ota.updater.Agent.releases", return_value=[{"tag_name": "v1.4.1", "draft": False, "prerelease": False}]), \
+             patch("ota.updater.Agent.manifest", return_value={**self.info, "version": "v1.4.1", "projects": ["project"]}):
+            setup.agent.once()
+        self.assertEqual("v1.4.1", read_json(self.state / "setup.json")["requested_version"])
+
+    def test_after_first_stable_enrollment_newer_rc_is_still_ignored(self):
+        setup = self.waiting()
+        self.stable()
+        setup.agent.once()
+        self.assertTrue(self.worker().run())
+        self.running[SERVICE] = False
+        with patch("ota.updater.Agent.releases", return_value=[{"tag_name": "v1.4.1-rc.1", "draft": False, "prerelease": True}]), \
+             patch("ota.updater.Agent.manifest") as manifest:
+            setup.agent.once()
+        manifest.assert_not_called()
+        self.assertEqual("no_update", setup.agent.store.get("last_poll")["action"])
+        self.assertEqual(["v1.4.1-rc.1"], setup.agent.store.get("last_poll")["rc_skipped"])
+        self.assertEqual("v1.4.0", setup.agent.current()[1]["version"])
+
+    def test_waiting_registration_interruption_restores_files_without_stopping_app(self):
+        self.config["role"] = "production"
+        atomic_json(self.source, self.config)
+        setup = self.start()
+        from ota.install_agent import waiting_install
+        def interrupted(agent):
+            waiting_install(agent)
+            raise KeyboardInterrupt
+        with patch("ota.setup.waiting_install", side_effect=interrupted), self.assertRaises(KeyboardInterrupt):
+            setup.run()
+        self.assertFalse(self.worker().run())
+        self.assertNotIn(("stop", "facial_recognition.service"), self.calls)
+        self.assertFalse(setup.targets["runtime"].exists())
+        self.assertIsNone(setup.agent.store.get("waiting_enrollment"))
+
+    def test_waiting_committed_checkpoint_finishes_after_restart_without_reinstall(self):
+        self.config["role"] = "production"
+        atomic_json(self.source, self.config)
+        setup = self.start()
+        with patch.object(setup, "finish", side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
+            setup.run()
+        self.assertEqual("committed", read_json(setup.journal)["phase"])
+        with patch("ota.setup.waiting_install") as installer:
+            self.assertTrue(self.worker().run())
+        installer.assert_not_called()
+        self.assertTrue(setup.agent.waiting())
+        self.assertNotIn(("stop", "facial_recognition.service"), self.calls)
+
+    def test_waiting_partial_registration_is_recovered_without_stopping_original(self):
+        self.config["role"] = "production"
+        atomic_json(self.source, self.config)
+        setup = self.start()
+        from ota.install_agent import waiting_install
+        def partial(agent):
+            waiting_install(agent)
+            raise RuntimeError("injected registration failure")
+        with patch("ota.setup.waiting_install", side_effect=partial):
+            self.assertFalse(setup.run())
+        self.assertNotIn(("stop", "facial_recognition.service"), self.calls)
+        self.assertFalse(setup.targets["runtime"].exists())
+        self.assertFalse(setup.targets["poll"].exists())
+        self.assertIsNone(setup.agent.store.get("waiting_enrollment"))
+
+    def test_waiting_rollback_failure_is_blocked_and_timestamped(self):
+        setup = self.waiting()
+        self.stable()
+        setup.agent.once()
+        self.new_failure = self.restore_failure = True
+        self.assertFalse(self.worker().run())
+        self.assertTrue(setup.agent.store.get("blocked"))
+        self.assertIn("rollback_failed_at", setup.agent.store.latest_summary())
+        self.running[SERVICE] = False
+        before = read_json(self.state / "setup.json")
+        setup.agent.once()
+        self.assertEqual(before, read_json(self.state / "setup.json"))
 
     def test_early_preparation_failure_does_not_stop_original_service(self):
         setup = self.start()

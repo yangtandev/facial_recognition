@@ -10,12 +10,12 @@ import uuid
 from ota.configure import configuration_path, configure
 from ota.core import (atomic_json, atomic_text, digest, error_summary, file_lock,
                       migrate_config, read_json, select_release, sync_directory, sync_tree, timestamp, version_key)
-from ota.install_agent import install
+from ota.install_agent import install, waiting_install
 from ota.notifications import mail_once
 from ota.updater import Agent, independent_python, systemctl, update_ready
 
 SERVICE = "facial-ota-setup.service"
-TERMINAL = ("complete", "failed", "rollback_failed")
+TERMINAL = ("complete", "waiting_release", "failed", "rollback_failed")
 MODEL = "models/data/20180402-114759-vggface2.pt"
 IGNORE = shutil.ignore_patterns("__pycache__", "test_*", "*.local.json", "dist", "wheelhouse")
 
@@ -79,6 +79,8 @@ class Setup:
 
     def select(self):
         releases = self.agent.releases()
+        if self.data.get("automatic"):
+            releases = [release for release in releases if release.get("tag_name") == self.data["requested_version"]]
         project = self.agent.identity()["project"]
         if project == "unknown":
             raise ValueError("Cannot determine project; check Server.API_url and location_ID")
@@ -89,12 +91,8 @@ class Setup:
             releases.remove(candidate)
         raise RuntimeError("No published Release applies to this role/project; complete Release assets are required")
 
-    def enroll(self):
+    def original(self):
         agent = self.agent
-        self.phase("preparing", from_version="legacy", target_version="unavailable", mode="enrollment")
-        # Never reinterpret a partial/manual installation as ownership of its files.
-        if any(path.exists() or path.is_symlink() for name, path in self.targets.items() if name != "config"):
-            raise FileExistsError("Incomplete/manual OTA installation detected; preserve existing files and repair it first")
         if not active(agent.service) or int(property_value(agent.service, "MainPID")) <= 0:
             raise RuntimeError("Original recognition service must be running before enrollment")
         working = Path(property_value(agent.service, "WorkingDirectory")).resolve(strict=True)
@@ -105,8 +103,51 @@ class Setup:
         if old_info:
             version_key(old_info["version"])
             self.data.update(old_info=old_info, from_version=old_info["version"])
+        return working
+
+    def validate_waiting(self):
+        agent = self.agent
+        owned = agent.store.get("waiting_enrollment")
+        if owned:
+            if agent.config["role"] != "production" or not self.targets["runtime"].is_dir() or self.targets["runtime"].is_symlink():
+                raise ValueError("Waiting enrollment identity/runtime mismatch")
+            for name in ("poll", "notify"):
+                content = self.targets[name].read_text()
+                if (not content.startswith("# Managed by facial-ota\n") or str(agent.root / "agent.json") not in content
+                        or digest(self.targets[name]) != owned.get("unit_sha256", {}).get(name)):
+                    raise ValueError("Unowned waiting service; do not overwrite manual settings")
+        allowed = {"config", "runtime", "poll", "notify"} if owned else {"config"}
+        if any(path.exists() or path.is_symlink() for name, path in self.targets.items() if name not in allowed):
+            raise FileExistsError("Incomplete/manual OTA installation detected; preserve existing files and repair it first")
+        return owned
+
+    def register_waiting(self):
+        agent = self.agent
+        self.phase("preparing", mode="waiting_registration", from_version="legacy", target_version="unavailable",
+                   waiting_before=agent.store.get("waiting_enrollment"))
+        if agent.store.get("blocked"):
+            raise RuntimeError("Repair the blocked installation before maintaining waiting tools")
+        owned = self.validate_waiting()
+        working = self.original()
+        with file_lock(str((agent.shared / "config.json").resolve()) + ".lock"):
+            self.snapshot()
+            self.phase("switching", waiting_descriptor={"working_dir": str(working),
+                       "version": self.data.get("old_info", {}).get("version", "legacy")})
+            if owned:
+                systemctl("stop", "facial-ota-poll.service", "facial-ota-notify.service")
+            waiting_install(agent)
+            self.data["waiting_descriptor"]["unit_sha256"] = {name: digest(self.targets[name]) for name in ("poll", "notify")}
+            self.phase("committed")
+
+    def enroll(self):
+        agent = self.agent
+        self.phase("preparing", from_version="legacy", target_version=self.data.get("requested_version", "unavailable"),
+                   mode="enrollment", waiting_before=agent.store.get("waiting_enrollment"))
+        owned = self.validate_waiting()
+        working = self.original()
         release, manifest = self.select()
         self.phase("preparing", target_version=release["tag_name"])
+        old_info = self.data.get("old_info")
         if old_info and version_key(release["tag_name"]) < version_key(old_info["version"]):
             raise ValueError("Enrollment must not downgrade the running packaged version")
         if not (working / MODEL).is_file() or digest(working / MODEL) != manifest.get("feature_model_sha256"):
@@ -129,7 +170,9 @@ class Setup:
             systemctl("start", agent.service)
             agent.wait_healthy(info)
             self.phase("installing")
-            install(self.config_path, new, _locked=True)
+            if owned:
+                systemctl("stop", "facial-ota-poll.service", "facial-ota-notify.service")
+            install(self.config_path, new, upgrade=bool(owned), _locked=True)
             self.phase("committed")
 
     def upgrade_agent(self):
@@ -150,6 +193,11 @@ class Setup:
 
     def finish(self, recovering=False):
         agent = self.agent
+        if self.data["mode"] == "waiting_registration":
+            agent.store.set("waiting_enrollment", self.data["waiting_descriptor"])
+            systemctl("enable", "--now", "facial-ota-poll.service", "facial-ota-notify.service")
+            self.phase("waiting_release", rollback="not_needed")
+            return
         status = agent.wait_healthy(self.data["new_info"]) if recovering else agent.check(self.data["new_info"])
         if not update_ready(status):
             raise RuntimeError("Baseline became unhealthy before enabling OTA")
@@ -160,6 +208,7 @@ class Setup:
             systemctl("daemon-reload")
         systemctl("enable", "--now", "facial-ota-poll.service", "facial-ota-notify.service")
         agent.store.set("blocked", False)
+        agent.store.set("waiting_enrollment", None)
         agent.store.record(self.data["attempt_id"], "success", {**self.data, "operation": self.data["mode"],
             "running_version": self.data["target_version"], "service_healthy": status.get("healthy") is True,
             "rollback": "not_needed"}, agent.identity())
@@ -186,7 +235,7 @@ class Setup:
                     # The setup journal still prevents its poll loop from updating.
                     pass
         for name, target in self.targets.items():
-            if self.data["mode"] == "agent_upgrade" and name in ("bootstrap", "current"):
+            if self.data["mode"] in ("agent_upgrade", "waiting_registration") and name in ("bootstrap", "current"):
                 continue  # Never disturb the running application's current path during agent maintenance.
             snapshot = self.data["snapshots"][name]
             if target.exists() or target.is_symlink():
@@ -203,10 +252,12 @@ class Setup:
         if self.data["mode"] == "enrollment":
             atomic_json((agent.shared / "config.json").resolve(), read_json(backup / "site-config.json"))
         systemctl("daemon-reload")
+        if self.data["mode"] in ("enrollment", "waiting_registration"):
+            agent.store.set("waiting_enrollment", self.data.get("waiting_before"))
         if self.data["mode"] == "enrollment":
             systemctl("reset-failed", agent.service)
             systemctl("start", agent.service)
-        else:
+        if self.data["mode"] == "agent_upgrade" or self.data.get("waiting_before"):
             systemctl("enable", "--now", "facial-ota-poll.service", "facial-ota-notify.service")
         if self.data.get("old_info"):
             value = agent.wait_healthy(self.data["old_info"])
@@ -260,6 +311,8 @@ class Setup:
                 try:
                     if (agent.root / "current").is_symlink():
                         self.upgrade_agent()
+                    elif agent.config["role"] == "production" and not self.data.get("automatic"):
+                        self.register_waiting()
                     else:
                         self.enroll()
                     self.finish()
@@ -272,6 +325,11 @@ class Setup:
                     self.fail(error)
             elif phase not in TERMINAL:
                 self.fail(RuntimeError("Interrupted initial setup; restoring original service"))
+        # An enrolled waiting notify worker owns mail retry; do not keep setup active
+        # during an SMTP outage and thereby block a later eligible Release.
+        if agent.store.get("waiting_enrollment") and active("facial-ota-notify.service"):
+            systemctl("disable", SERVICE)
+            return self.data["phase"] in ("complete", "waiting_release")
         # Leave recovery enabled until failed mail is durably accepted, even across reboot.
         while agent.store.outstanding():
             live = agent.root / "agent.json"
@@ -288,7 +346,7 @@ class Setup:
         return self.data["phase"] == "complete"
 
 
-def launch(project, config_path=None, profile=None, role=None):
+def launch(project, config_path=None, profile=None, role=None, automatic=False, version=None):
     os.umask(0o077)
     selected = configuration_path(project, config_path)
     if profile or role:
@@ -306,6 +364,10 @@ def launch(project, config_path=None, profile=None, role=None):
     with file_lock(agent.root / "setup-launch.lock", blocking=False):
         journal = agent.root / "setup.json"
         data = read_json(journal) if journal.is_file() else {}
+        if automatic and (active(SERVICE) or agent.store.get("blocked") or (agent.root / "current").is_symlink()):
+            return agent.root
+        if automatic and (not agent.store.get("waiting_enrollment") or agent.config["role"] != "production" or not version_key(version)[3]):
+            raise ValueError("Automatic first enrollment requires an owned production waiting installation and stable tag")
         if active(SERVICE) and data.get("phase") not in TERMINAL:
             print("首次接入正在執行，沿用同一作業。")
             return agent.root
@@ -326,7 +388,8 @@ def launch(project, config_path=None, profile=None, role=None):
                     + " -m ota.setup --worker --config " + str(config_copy)
                     + "\nRestart=on-failure\nRestartSec=30\nTimeoutStartSec=0\nUMask=0077\n\n[Install]\nWantedBy=default.target\n")
         atomic_json(journal, {"attempt_id": attempt, "phase": "requested", "from_version": "unknown",
-                              "target_version": "unavailable", "source_config": str(config_path)})
+                              "target_version": "unavailable", "source_config": str(config_path),
+                              "automatic": automatic, **({"requested_version": version} if automatic else {})})
         systemctl("daemon-reload")
         systemctl("enable", SERVICE)
         systemctl("--no-block", "start", SERVICE)
@@ -341,6 +404,9 @@ def wait(root):
             print("OTA:", data["phase"], data.get("target_version", ""), flush=True)
             previous = data["phase"]
         if data["phase"] in TERMINAL:
+            if data["phase"] == "waiting_release":
+                print("OTA 輪詢與通知已啟用；等待適用正式版，現有辨識服務不變。")
+                return True
             if data["phase"] == "complete":
                 print("OTA 已啟用；後續版本由主機自動更新。")
                 return True

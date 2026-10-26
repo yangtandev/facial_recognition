@@ -2,6 +2,7 @@
 
 - [開發機](#development-host)：開發、測試、封裝及發布。
 - [測試機／正式機](#field-host)：首次安裝與既有主機設定。
+- [首次正式版尚未發布時的新機初裝](#initial-acceptance)：固定來源驗收；已正常啟動者由第 6 步繼續。
 - [一鍵環境檢查](#host-preflight)、[一鍵 OTA 驗收](#ota-check)：免逐台手動判讀多個指令。
 - [SMTP 設定](#smtp)：自動寫入主機 ID、角色與通知設定。
 - [首次接入 OTA](#ota-enrollment)：一次指令自動準備、驗收及啟用。
@@ -69,7 +70,7 @@
 2. 新主機依[第 2 節](#first-install)安裝；已有 config 的主機使用[僅設定模式](#smtp)，不重跑完整安裝。
 3. 測試機選 test；正式機選 production。精靈自動產生各機不同的 UUID。
 4. 保留各機 API、location、攝影機、照片來源與 MQTT。
-5. 依[第 4 節](#ota-enrollment)執行一次接入指令；程式自動準備基準版本（baseline）、驗收及啟用服務。
+5. 依[第 4 節](#ota-enrollment)執行一次接入指令；正式機可先啟用輪詢等待首個正式版，原辨識服務不變。正式版到達後自動準備基準版本（baseline）與驗收。
 6. 測試機自動選適用 RC／正式版，正式機只選人工放行的正式版；兩者都須在本機通過啟動檢查。
 7. 測試機通過 RC 人工實測後，由開發人員發布正式版；測試機維持 test，也會更新成正式版。
 8. 各機獨立查詢、更新與寄信，不互相等待。
@@ -96,7 +97,7 @@
 
 3. --preflight 自動列出使用者、家目錄、OS、Python、CPU 架構、可用磁碟、GPU 與是否已有 config；不安裝套件、不改 JSON、不切換／重啟服務、不寄信。result=info 是資訊盤點，不代表已驗證 Release／網路／相機／venv。
 4. config_exists=true：停止完整安裝，改用[第 3、4 節](#smtp)。若是重做失敗的初次安裝，也先排查，不刪 config 來強行重跑。
-5. 這裡取得開發分支只為使用工具，尚未部署 app；正式機不要直接執行完整 install.sh 安裝此分支。尚無通過實測、涵蓋該專案的正式 Release 時，先停在此處，不把正式機改成 test 來接收 RC。
+5. 這裡取得開發分支只為使用工具，尚未部署 app；正式營運使用下節已放行版本。首次正式版尚未發布、管理者要先在新機驗證初裝時，依[第 2.3 節](#initial-acceptance)固定指定來源，不直接安裝隨時變動的分支，也不把正式機改成 test 來接收 RC。
 
 ### 2.2 安裝已放行版本
 
@@ -128,7 +129,7 @@
    journalctl --user -u facial_recognition.service -n 100 --no-pager
    ```
 
-7. 接入 OTA，沿用已填的設定；自動下載適用 Release、準備隔離環境、備份、切換、穩定驗收及啟用背景服務。正常情況不用自己下載套件／填 baseline 路徑／手動 enable：
+7. 使用本版 OTA 工具接入，沿用已填的設定；正式機先啟用輪詢與通知，不停止辨識。適用正式 Release 到達後自動下載、準備隔離環境、備份、切換及驗收。若 tag 內工具較舊，先依[第 4.1 節](#ota-enrollment)更新工具。正常情況不用手填 baseline 路徑或 enable：
 
    ```bash
    bash install.sh --ota-setup
@@ -140,6 +141,99 @@
 
 - 已有 config.json 時，完整安裝會拒絕執行，避免覆蓋現場設定；改用下節。
 - 不用 setting/build_config.py 遷移舊設定，避免遺失未知欄位。
+
+<a id="initial-acceptance"></a>
+
+### 2.3 首次正式版尚未發布：新機先做初裝驗收
+
+- 適用全新、尚無 config 的待驗收主機；不代表已放行正式營運。本節固定來源為 c831bbdc434a328caf12d09fd1ccc70104a565ea，包含新版安裝與檢查工具，但不是已發布正式套件。
+- production 是 OTA 選版角色，不會阻止管理者透過 install.sh 人工安裝指定來源；人工初裝與 OTA 接入是兩個階段。來源版缺少 BUILD_INFO.json 時，health 的 version／build_id 可為 unknown，不能當作已安裝某個 Release。
+- 已完成以下第 5 步、辨識正常啟動者，直接從第 6 步繼續；不要重新 clone、切換程式或重跑完整安裝。
+
+1. 在新主機的桌面終端、以日後運行服務的使用者操作，先裝下載工具：
+
+   ```bash
+   sudo apt update
+   sudo apt install -y git python3-venv pciutils
+   ```
+
+2. 確認尚無 $HOME/facial_recognition 目錄，再下載、固定來源並盤點環境。任何一步失敗就停止，不刪既有目錄來重做；私有 repo 的 Git 驗證使用有權限的唯讀 PAT，不將 token 放入 URL：
+
+   ```bash
+   cd "$HOME"
+   git clone --branch develop-v1.0.0 https://github.com/yangtandev/facial_recognition.git &&
+   cd "$HOME/facial_recognition" &&
+   git switch --detach c831bbdc434a328caf12d09fd1ccc70104a565ea &&
+   bash install.sh --preflight
+   ```
+
+   Ubuntu 24.04／Python 3.12／x86_64 主機應看到相符資訊及 config_exists=false；若已有 config，停止完整安裝。
+
+3. 安裝首次辨識服務（不是 sudo bash install.sh）：
+
+   ```bash
+   cd "$HOME/facial_recognition"
+   bash install.sh
+   ```
+
+   - 角色填 production，repo 填 yangtandev/facial_recognition；輸入唯讀 GitHub token、SMTP、管理員信箱，測試信選 y 並確認收到。
+   - 伺服器 IP／帳號／密碼及照片路徑，是建檔照來源伺服器的資料，不是這台新機的登入資料，也不是 OTA 管理端。
+   - IN／OUT RTSP、API、location ID 使用此現場自己的值，不盲目沿用 demosite 等預設值。
+   - UUID、JSON、模型、venv 與服務由腳本處理；requirements 安裝可能下載 CUDA 依賴，尚非 Release 的 CPU 離線環境。中途失敗先查錯，不刪 config／venv 強行重跑。
+
+4. 安裝完成後，安排重開機，再登入原使用者桌面／AnyDesk：
+
+   ```bash
+   sudo reboot
+   ```
+
+5. 確認辨識畫面啟動，並查原服務及日誌：
+
+   ```bash
+   cd "$HOME/facial_recognition"
+   systemctl --user status facial_recognition.service --no-pager
+   journalctl --user -u facial_recognition.service -n 100 --no-pager
+   ```
+
+   active 只證明程序啟動，不代表真人辨識、照片同步及 OTA 已驗收。
+
+6. 初裝啟動後，核對角色、repo、專案及 location ID；以下只讀取指定欄位，不印 token／SMTP 密碼、不查外部 API：
+
+   ```bash
+   cd "$HOME/facial_recognition"
+   python3 - <<'PY'
+   import json
+   from pathlib import Path
+   from urllib.parse import urlsplit
+   from ota.configure import configuration_path
+   from ota.core import read_json
+
+   agent = read_json(configuration_path(Path.cwd()))
+   server = read_json("config.json")["Server"]
+   host = urlsplit(server.get("API_url", "")).hostname or ""
+   print(json.dumps({"role": agent.get("role"), "repo": agent.get("repo"),
+                     "project": host.split(".")[0], "location_ID": server.get("location_ID")},
+                    ensure_ascii=False, indent=2))
+   PY
+   ```
+
+   - role 應為 production、repo 應為 yangtandev/facial_recognition；專案／地點須符合這台現場。這裡只核對 location ID，地點名稱由 OTA 依業務 API 查詢。
+   - 真人實測 IN／OUT 辨識、進出方向、語音與畫面；新增或更新一筆建檔照，確認 MQTT 收到後照片／特徵同步、實際可辨識，不能只看 MQTT 連線成功。
+   - 確認管理員收到安裝時的 SMTP 測試信。尚未測試、角色填錯或通知設定要調整時才執行 bash install.sh --ota-config-only；Enter 保留原值、選 y 測信，不重裝辨識服務。
+   - 保留目前正常服務；接下來更新 OTA 工具並接入，不自行 enable 不存在的服務，不改成 test，也不把目前來源冒充成正式版。
+
+7. c831bbd 的舊工具尚不支援待命接入；先依[第 4.1 節](#ota-enrollment)取得本版 ota/ 與 install.sh，再保留現有 config／venv／服務直接接入。即使只有 RC、沒有正式 Release，也能先啟用輪詢，不必等正式版再下指令：
+
+   ```bash
+   cd "$HOME/facial_recognition"
+   bash install.sh --ota-setup &&
+   bash install.sh --ota-check --expect-role production
+   ```
+
+   應看到 setup.phase／enrollment_state／檢查 result 為 waiting_release，三服務 active／enabled；selected_build=null 是尚未安裝首個正式套件，不是失敗。尚無正式版不寄更新失敗信；原服務程序與 MQTT 不因待命接入而重啟。
+
+8. 發布適用同專案的新 RC，等至少一輪查詢後，依[第 7.1 節](#ota-check)查 last_poll.query_ok=true、checked_at 晚於發布時間、rc_skipped 包含該 RC；同時確認原辨識服務 MainPID／NRestarts 未變且持續正常，證明正式機有查到但沒有安裝 RC。待命狀態沒有正式 version／build ID，不偽造版號。測試機應自行更新該 RC；未啟用輪詢、查詢失敗或尚未查到該 RC，不能當作隔離測試通過。
+9. RC 驗收通過、管理者發布適用正式 Release 後，這台正式機會自動下載並安裝，不再執行接入指令。成功後 selected_build 與即時 health 相符、enrollment_state=managed、setup.phase=complete；首次安裝失敗保留／還原原服務及設定，寄失敗信，同一失敗版不無限重試，修正版或人工 retry 才重試。
 
 <a id="smtp"></a>
 
@@ -213,8 +307,19 @@
 ### 4.1 現場需要做的事
 
 1. 確認原 facial_recognition.service 正在運作，該服務使用這台自己的 config.json。安排可接受短暫切換的維護時段。
-2. 將本版 ota/ 與 install.sh 提供至原專案；不用覆寫正在運行的 main.py、config 或 venv。
-3. 開發端須先發布適用專案、附完整更新包與 release.json 的 GitHub Release。只有 tag／source archive 不足以接入；正式機沒有適用正式 Release 時不會改裝 RC。
+2. 將本版 ota/ 與 install.sh 提供至原專案；不用覆寫 main.py、config 或 venv。只有 AnyDesk 時可安全傳送檔案；原專案有 Git 的主機，在管理者已將本版工具提交推送後，可用以下指令先備份，再只取出工具（不切換 app、不做 git pull）：
+
+   ```bash
+   cd "$HOME/facial_recognition"
+   FACIAL_OTA_TOOLS_BACKUP=$(mktemp -d "$HOME/facial-ota-tools.XXXXXX") &&
+   cp -a ota install.sh "$FACIAL_OTA_TOOLS_BACKUP/" &&
+   git fetch origin develop-v1.0.0 &&
+   git archive --format=tar --output="$FACIAL_OTA_TOOLS_BACKUP/tools.tar" FETCH_HEAD -- ota install.sh &&
+   tar -xf "$FACIAL_OTA_TOOLS_BACKUP/tools.tar" -C "$PWD"
+   ```
+
+   備份目錄包含本機 OTA 帳密，請保留其私有權限、不上傳 Git；解壓不覆蓋未追蹤的 agent.local.json。開發端尚未推送本版時，執行上述指令仍只會取得舊工具。固定來源／detached HEAD 的主機也不需切換原辨識程式。
+3. 正式機不用先有正式 Release；它先進入 waiting_release，直接查 GitHub、跳過 RC，沒有正式版是正常待命。測試機第一次建立基準仍需適用的 RC／正式 Release；真正安裝都須有完整 .tar.gz 與 release.json，只有 tag／source archive 不夠。
 4. 已完成 SMTP 設定者只需執行：
 
    ```bash
@@ -223,17 +328,18 @@
    ```
 
 5. 尚未設定者會先進入精靈；已設定者直接沿用，不重填帳密。多台主機可用上節 profile。
-6. 畫面顯示 complete／「OTA 已啟用」後，確認影像、真人辨識、語音與照片同步。後續適用版本由主機自行更新。
+6. 正式機顯示 waiting_release／「輪詢與通知已啟用」即完成待命接入，不會替換原服務；通常下一輪才出現 last_poll。測試機建立套件基準後顯示 complete。兩者皆需確認原辨識／MQTT 持續正常。
 7. 用[第 7.1 節](#ota-check)的一鍵驗收確認程序與三個服務；例如測試機執行 bash install.sh --ota-check --expect-role test。
 
 ### 4.2 程式自動完成的步驟
 
-1. 依角色、專案與 SemVer 選 Release，下載完整更新包、驗證摘要及 Python／CPU 相容性。
-2. 另建程式環境；準備階段舊版繼續運作。只選主機已安裝且相符的系統 Python，不自動升級系統套件。
-3. 備份原服務設定與現場 config，保留原程式及環境；新欄位補預設、更名按規則遷移，衝突或模型不相容就拒絕切換。
-4. 短暫停止辨識／MQTT、切換新版，自動檢查版本／build ID／PID、模型推論、人臉索引、GUI、取像／偵測／比對執行緒，以及 MQTT 連線、訂閱和建檔照同步。
-5. 通過啟動與穩定觀察後，登記第一個基準版本（baseline），安裝並啟用 poll／notify。baseline 是日後回退的起點，不是另一種版本名稱。
-6. 攝影機暫離線不單獨觸發回退；update_ready=true 代表必要啟動檢查通過，healthy=true 還要求啟用相機有新影像。恢復後仍需影像及業務實測。
+1. 沒有套件基準的正式機先備份服務／設定、安裝獨立 poll／notify；不改 app 啟動路徑、不停止辨識或 MQTT、不偽造正式版號。無適用正式版、GitHub 暫時不可達時保留原服務並稍後再查；查詢錯誤與待命狀態可從 last_poll 區分。
+2. 找到適用正式版時，由獨立 setup worker 安裝；測試機則依角色選 RC／正式版。下載完整更新包、驗證摘要及 Python／CPU 相容性。
+3. 另建程式環境；準備階段舊版繼續運作。只選主機已安裝且相符的系統 Python，不自動升級系統套件。
+4. 備份原服務設定與現場 config，保留原程式及環境；新欄位補預設、更名按規則遷移，衝突或模型不相容就拒絕切換。
+5. 短暫停止辨識／MQTT、切換新版，自動檢查版本／build ID／PID，模型、索引、GUI、必要執行緒，以及 MQTT 連線、訂閱和建檔照同步。
+6. 通過啟動與穩定觀察後，登記第一個基準版本（baseline）、切換為 managed；待命輪詢自動銜接日後更新，不需要人工再接入。baseline 是日後回退的起點，不是另一種版本名稱。
+7. 攝影機暫離線不單獨觸發回退；update_ready=true 代表必要啟動檢查通過，healthy=true 還要求啟用相機有新影像。恢復後仍需影像及業務實測。
 
 ### 4.3 斷線、失敗與重跑
 
@@ -242,10 +348,10 @@
 - 原版沒有健康檢查時，恢復後只能確認原程序持續運行，回退結果記為 restored_unverified；不宣稱業務已全面正常，收到信後需確認辨識。
 - 恢復也失敗會記 rollback_failed／阻止後續更新，通知含失敗時間與時區；由 AnyDesk 人工修復。
 - 備份在 state_dir/enrollment/作業UUID，包含 site-config.json 與 original-service.txt；替換的工具／服務檔會移入備份目錄，不直接刪除。
-- SMTP 不通就先保存在本機，setup 背景工作持續補寄；完成後停用該一次性工作，一般監看由 notify 負責。
+- SMTP 不通就先保存在本機；已接入待命或一般 OTA 者由 notify 補寄，尚無可用 notify 時由 setup worker 持續補寄。SMTP 故障不阻塞待命輪詢或回退。
 - 同一接入仍在進行時重跑命令，只顯示同一工作，不重複切換；中斷的切換會先恢復原服務，不直接重做新版本。
-- 已完成 OTA 後，使用新版工具重跑 --ota-setup 會備份並更新獨立 agent、恢復 poll／notify；不重裝 app、不停止辨識、不更換 UUID。這一步用於 updater 本體維護，一般 app 更新不用跑。
-- 初次接入失敗後明確重跑 --ota-setup 可再試；一般自動更新仍遵守失敗版本不無限重試的規則。
+- 已完成待命或一般 OTA 後，使用新版工具重跑 --ota-setup 會備份並更新獨立 agent、恢復 poll／notify；不重裝 app、不停止辨識、不更換 UUID。這一步用於 updater 本體維護，一般 app 更新不用跑。
+- 首次正式版安裝失敗後，待命服務保留、失敗版不無限重試；排除原因後用第 7.2 節 retry 或發布修正版。重跑 --ota-setup 僅維護待命工具，不清除失敗版紀錄。尚未成功註冊待命者，修復接入問題後才重跑。
 - 半套手動安裝或不明的既有服務檔不會直接覆寫；先查狀態及備份，避免把別人的設定當成自動安裝產物。
 - 查結果與日誌：
 
@@ -270,6 +376,7 @@
 | 人工通過，發布 v1.0.1 正式 Release | 更新正式版 | 各自查到後更新 |
 
 - 完整正式 Release 發布就是人工放行點。
+- 新正式機已接入 waiting_release 時，RC 發布也會實際輪詢並記錄跳過；首個正式 Release 發布後自動首次安裝，不需再人工下接入指令。
 - 測試機已測 v1.0.2-rc.1 時，不因 v1.0.1 發布而降版。
 - 不適用專案的 Release 跳過；主機不互相等待。
 - 人工發現功能問題但健康驗收已通過時，不會因人工回報而自動回退；修正後重走 RC。
@@ -381,8 +488,9 @@ bash install.sh --ota-check --expect-role test
 - 觀察時間可用 --seconds 15（允許 1～30 秒）；這是短時複查，不取代接入／更新時的 60 秒穩定驗收。
 - result=pass：上述自動檢查通過，仍須真人辨識、進出方向、語音與實際建檔照同步實測。
 - result=warning：核心驗收通過，但觀察期間曾無相機新影像或有待寄通知。相機無影像不判 OTA 失敗、不回退；需排查設備／網路或待寄異常。
+- result=waiting_release：原辨識程序及三服務穩定、OTA 已啟用，尚未安裝首個正式套件。此時只核對原服務路徑／PID／重啟數，不宣稱 Release 或功能健康驗收通過，不能加 --expect-version。看 last_poll.query_ok、checked_at、rc_skipped 確認真的查到並跳過 RC；warnings 會指出尚未查詢成功、首次正式版失敗或有待寄通知。
 - result=fail：尚未接入、角色／版本不符、最近更新失敗、服務未啟動／未設開機啟用、核心／MQTT／計數異常等，不能宣稱安裝成功。按 reason、下方指令及日誌排查；更新正在進行或尚在啟動時，等完成再查。
-- pass／warning 結束碼 0，fail 為 1；自動化可判斷結束碼，完整健康另看 result 與 warnings。檢查不重啟／更新／回退、不寄信、不修改 JSON 或 OTA 紀錄；不會印 token／SMTP 密碼。
+- pass／warning／waiting_release 結束碼 0，fail 為 1；0 只表示該狀態檢查通過，不能一概當作正式套件健康。完整結果另看 result 與 warnings。檢查不重啟／更新／回退、不寄信、不修改 JSON 或 OTA 紀錄；不會印 token／SMTP 密碼。
 
 #### 原始指令與人工判讀（舊工具也可用）
 
@@ -399,6 +507,8 @@ systemctl --user is-enabled facial_recognition.service facial-ota-poll.service f
 
 - is-active 應依序顯示三行 active，is-enabled 顯示三行 enabled；多個 unit 的整體退出碼不能代替逐項確認。NRestarts 不必為 0，但應保持穩定、不持續增加。[systemctl 文件](https://www.freedesktop.org/software/systemd/man/latest/systemctl.html)
 - setup.phase=complete、latest_update.phase=success，selected_build 與即時 health 的目標 version／build_id 相符、health.pid=MainPID、update_ready=true、blocked=false；這些都符合才確認 OTA 已接入及程序正常。
+- 待命接入則為 setup.phase／enrollment_state=waiting_release、selected_build=null、blocked=false；不是安裝失敗，也不是某正式版本已驗收。剛啟用時 last_poll 可為 null；預設有 token 約 300 秒、無 token 至少 1200 秒後再查，另計隨機延遲及操作耗時。
+- last_poll.query_ok=true、checked_at 晚於 RC 發布、rc_skipped 包含該 RC，配合服務持續 active、原程序／設定不變，才能確認「有查詢並跳過 RC」；query_failed／query_ok=false 不算隔離測試通過。rc_skipped 最多顯示 20 筆，總數在 rc_skipped_count；日誌也會記錄本輪結果。
 - latest_update 是歷史紀錄；還要查即時 health。pending=0 只代表沒有待寄通知，不能當作更新成功證據。
 - 健康觀察需要兩次相隔數秒，確認 counters 增加、boot_id／PID 不變；可重跑 curl，或直接用新版 --ota-check。
 - 預設 health port 為 8765；自訂設定時換成實際連接埠，一鍵驗收會自動讀取。所有指令都在原服務使用者登入後執行。
@@ -414,7 +524,7 @@ systemctl --user show facial_recognition.service -p MainPID -p NRestarts
 journalctl --user -u facial_recognition.service -u facial-ota-poll.service -u facial-ota-notify.service -n 100 --no-pager
 ```
 
-- setup 顯示首次接入進度與錯誤，尚未接入時 selected_build 可為 null；latest_update 顯示最近更新結果、回退及時間。selected_build 只是選中套件，不代表程序正常。
+- setup 顯示首次接入進度與錯誤；selected_build=null 可為未接入或已接入等待首個正式版，依 enrollment_state、setup.phase 與三服務區分。latest_update 顯示最近更新結果。selected_build 只是選中套件，不代表程序正常。
 - 即時 health 的版本／build ID 符合目標、PID 符合 MainPID、update_ready=true、必要計數增加且 boot ID 穩定。
 - 相機暫離線時可 update_ready=true、camera_ok=false、healthy=false；檢查設備／網路並待重連。
 - pending 包含退避中待寄通知；last_health 是最近背景結果，以即時 health 為準。
@@ -480,6 +590,9 @@ journalctl --user -u facial_recognition.service -u facial-ota-poll.service -u fa
 | --- | --- | --- |
 | 舊機設定 | 僅設定模式跑兩次 | config 不變、UUID 相同、私有設定 600 |
 | 自動接入 | 原服務運行時執行 --ota-setup | 自動下載、備份、遷移、驗收、啟用，不手改服務 |
+| 首次正式版待命 | production、只有 RC 或 GitHub 不可達時執行 --ota-setup | waiting_release、三服務啟用，原辨識／MQTT／config 不變，不冒充正式版、不因缺正式版寄失敗信 |
+| 待命跳過 RC | 發布適用專案 RC，等輪詢後查 last_poll | query_ok=true、checked_at 晚於發布、rc_skipped 有該版；測試機更新，正式機原服務不變 |
+| 首個正式版 | 待命時人工放行完整正式 Release | 自動下載／備份／切換／驗收成 managed；失敗還原原服務、待命繼續並寄信，不無限重試壞版 |
 | 多台共用設定 | 匯出 profile，在兩台不同專案匯入 | 無重複輸入帳密、UUID 不同，各自 config 保留 |
 | 設定熱讀 | poll／notify 運行中修改 SMTP／token | 無需停機重啟，下一輪使用新值 |
 | 中斷／重跑 | 接入中斷線、重啟，再重跑 | 同一工作復原，不重複切換；舊資料保留 |
@@ -510,6 +623,7 @@ journalctl --user -u facial_recognition.service -u facial-ota-poll.service -u fa
 | 流程 | 現在做法 |
 | --- | --- |
 | 各台手動找版本、下載套件、填路徑 | --ota-setup 自動完成 |
+| 等正式 Release 才逐台接入 | 正式機先 waiting_release；正式版放行後自行首次安裝 |
 | 逐台抄 OS／Python／GPU、判讀多個驗收指令 | --preflight 盤點；--ota-check 核對服務、版本、PID、健康與進度 |
 | 備份 config、編輯 systemd override、建立／啟用服務 | 首次接入程式自動完成，保留可復原備份 |
 | 主機 UUID、家目錄、專案路徑、GitHub repo 預填 | 自動取得；原設定優先保留 |

@@ -57,7 +57,7 @@ def services():
     result = {}
     for name in SERVICES:
         output = subprocess.run(["systemctl", "--user", "show", name,
-            "--property=ActiveState,UnitFileState,MainPID,NRestarts"],
+            "--property=ActiveState,UnitFileState,MainPID,NRestarts,WorkingDirectory"],
             check=True, capture_output=True, text=True, timeout=10).stdout
         value = dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
         if value.get("ActiveState") != "active" or value.get("UnitFileState") != "enabled":
@@ -101,9 +101,40 @@ def check(project, config_path=None, expect_version=None, expect_role=None, seco
         raise CheckFailed("主機角色不符，或是沒有現場 OTA 的開發機")
     root = Path(config["state_dir"]).expanduser().resolve()
     journal = read_json(root / "setup.json")
+    current = root / "current"
+    with closing(sqlite3.connect((root / "agent.sqlite3").as_uri() + "?mode=ro", uri=True, timeout=5)) as db:
+        state = {key: json.loads(value) for key, value in db.execute(
+            "SELECT key,value FROM state WHERE key IN ('blocked','waiting_enrollment','last_poll')")}
+        latest = db.execute("SELECT phase,tag FROM attempts ORDER BY updated DESC LIMIT 1").fetchone()
+        pending = db.execute("SELECT COUNT(*) FROM outbox WHERE delivered=0").fetchone()[0]
+    if state.get("blocked"):
+        raise CheckFailed("OTA blocked；請先修復並查回退紀錄")
+    if state.get("waiting_enrollment") and not current.is_symlink():
+        if role != "production" or expect_version or journal.get("phase") not in ("waiting_release", "failed"):
+            raise CheckFailed("仍在等待首個正式版，不能驗收指定版本；進行中的作業請稍後重查")
+        before_units = services()
+        working = Path(before_units[APP].get("WorkingDirectory", "")).resolve()
+        if str(working) != state["waiting_enrollment"]["working_dir"]:
+            raise CheckFailed("原辨識服務路徑已改變，不能確認待命復原來源")
+        time.sleep(seconds)
+        if before_units != services():
+            raise CheckFailed("觀察期間服務重啟／狀態改變，請待穩定後重查")
+        if current.is_symlink() or read_json(root / "setup.json") != journal:
+            raise CheckFailed("觀察期間接入狀態改變，請待本次作業完成後重查")
+        warnings = []
+        if not (state.get("last_poll") or {}).get("query_ok"):
+            warnings.append("尚未成功查詢 GitHub；請待下一輪，查 last_poll 與日誌")
+        if latest and latest[0] == "failed":
+            warnings.append("最近首次安裝失敗；已保留／還原原服務，請查 --ota-status 與通知")
+        if pending:
+            warnings.append("有待寄失敗／異常通知")
+        return {"result": "waiting_release", "role": role, "baseline_ready": False,
+                "pid": int(before_units[APP]["MainPID"]), "last_poll": state.get("last_poll"),
+                "observed_seconds": seconds, "pending": pending, "warnings": warnings,
+                "services": {name: "active / enabled" for name in SERVICES},
+                "note": "OTA 已啟用、原服務程序穩定，尚未安裝首個正式套件；不宣稱 Release／業務健康驗收通過"}
     if journal.get("phase") != "complete":
         raise CheckFailed("首次接入／更新器維護尚未完成；請查 --ota-status")
-    current = root / "current"
     if not current.is_symlink():
         raise CheckFailed("尚無已接入 OTA 的 current 版本")
     info = read_json(current.resolve(strict=True) / "BUILD_INFO.json")
@@ -112,15 +143,8 @@ def check(project, config_path=None, expect_version=None, expect_role=None, seco
         raise CheckFailed("套件缺少 build ID")
     if (expect_version and info["version"] != expect_version) or (role == "production" and not version[3]):
         raise CheckFailed("目前版本不符預期，或正式機正在使用 RC")
-    # Never instantiate Agent/Store: those constructors initialize/migrate local state.
-    with closing(sqlite3.connect((root / "agent.sqlite3").as_uri() + "?mode=ro", uri=True, timeout=5)) as db:
-        row = db.execute("SELECT value FROM state WHERE key='blocked'").fetchone()
-        if row and json.loads(row[0]):
-            raise CheckFailed("OTA blocked；請先修復並查回退紀錄")
-        latest = db.execute("SELECT phase,tag FROM attempts ORDER BY updated DESC LIMIT 1").fetchone()
-        if not latest or latest != ("success", info["version"]):
-            raise CheckFailed("最近作業未成功，或成功紀錄與選中版本不同；請查 --ota-status")
-        pending = db.execute("SELECT COUNT(*) FROM outbox WHERE delivered=0").fetchone()[0]
+    if not latest or latest != ("success", info["version"]):
+        raise CheckFailed("最近作業未成功，或成功紀錄與選中版本不同；請查 --ota-status")
     before_units = services()
     before = health(int(config.get("health_port", 8765)))
     inspect_health(before, info, before_units)

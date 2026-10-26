@@ -66,6 +66,70 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual("warning", result["result"])
         self.assertTrue(result["update_ready"])
 
+    def mark_waiting(self):
+        (self.state / "current").unlink()
+        self.settings["role"] = "production"
+        atomic_json(self.config, self.settings)
+        atomic_json(self.state / "setup.json", {"phase": "waiting_release"})
+        self.store.set("waiting_enrollment", {"working_dir": str(self.project), "version": "legacy"})
+        self.units[APP]["WorkingDirectory"] = str(self.project)
+        with self.store.connect() as db:
+            db.execute("DELETE FROM attempts")
+            db.execute("DELETE FROM outbox")
+
+    def test_waiting_is_read_only_and_does_not_claim_packaged_build_acceptance(self):
+        self.mark_waiting()
+        poll = {"query_ok": True, "checked_at": "2026-10-26T10:00:00+00:00", "action": "waiting_release", "rc_skipped": ["v1.4.0-rc.2"]}
+        self.store.set("last_poll", poll)
+        before = {path: path.read_bytes() for path in self.root.rglob("*") if path.is_file()}
+        result = self.run_check(expect_role="production")
+        self.assertEqual("waiting_release", result["result"])
+        self.assertFalse(result["baseline_ready"])
+        self.assertEqual(poll, result["last_poll"])
+        self.assertNotIn("version", result)
+        self.fetch.assert_not_called()
+        self.assertNotIn("SECRET", json.dumps(result))
+        self.assertEqual(before, {path: path.read_bytes() for path in self.root.rglob("*") if path.is_file()})
+
+    def test_waiting_without_successful_poll_warns_not_false_rc_isolation_success(self):
+        self.mark_waiting()
+        result = self.run_check()
+        self.assertTrue(result["warnings"])
+        self.assertIsNone(result["last_poll"])
+
+    def test_waiting_cannot_accept_expected_release_or_changed_service_path(self):
+        self.mark_waiting()
+        with self.assertRaises(CheckFailed):
+            self.run_check(expect_version="v1.4.0")
+        self.units[APP]["WorkingDirectory"] = str(self.root)
+        with self.assertRaises(CheckFailed):
+            self.run_check()
+
+    def test_waiting_failed_attempt_and_pending_mail_are_visible(self):
+        self.mark_waiting()
+        self.store.record("first-fail", "failed", {"target_version": "v1.4.0"}, {"device_id": "test", "role": "production"})
+        atomic_json(self.state / "setup.json", {"phase": "failed"})
+        result = self.run_check()
+        self.assertEqual("waiting_release", result["result"])
+        self.assertEqual(1, result["pending"])
+        self.assertGreaterEqual(len(result["warnings"]), 2)
+
+    def test_waiting_checks_fail_while_bootstrapping_or_blocked(self):
+        self.mark_waiting()
+        atomic_json(self.state / "setup.json", {"phase": "switching"})
+        with self.assertRaises(CheckFailed):
+            self.run_check()
+        atomic_json(self.state / "setup.json", {"phase": "waiting_release"})
+        self.store.set("blocked", True)
+        with self.assertRaises(CheckFailed):
+            self.run_check()
+
+    def test_waiting_check_rejects_bootstrap_starting_during_observation(self):
+        self.mark_waiting()
+        with patch("ota.diagnostics.time.sleep", side_effect=lambda seconds:
+                   atomic_json(self.state / "setup.json", {"phase": "preparing"})), self.assertRaises(CheckFailed):
+            self.run_check()
+
     def test_automatically_resolves_enrolled_settings(self):
         atomic_json(self.state / "agent.json", self.settings)
         self.assertEqual("pass", check(self.project)["result"])
