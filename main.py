@@ -1,3 +1,6 @@
+# Intentional failure RC for end-to-end OTA rollback validation; never promote.
+raise RuntimeError("Intentional startup failure for OTA rollback validation")
+
 import os
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
