@@ -9,7 +9,7 @@
 - [SMTP 設定](#smtp)：自動寫入主機 ID、角色與通知設定。
 - [首次接入 OTA](#ota-enrollment)：一次指令自動準備、驗收及啟用。
 - [多台主機共用設定](#fleet-profile)：匯出私有部署設定，省去逐台輸入帳密。
-- [一台測試機＋一台正式機的 OTA 測試步驟](#two-host-ota)：測試機收 RC／正式版，正式機只收正式版。
+- [本次 v1.5.0-rc.1 驗收指令](#ota-v150-rc1)、[一台測試機＋一台正式機的 OTA 測試步驟](#two-host-ota)：測試機收 RC／正式版，正式機只收正式版。
 - [運作範例](#runtime-flow)、[發布更新](#release)、[故障處理](#operations)、[驗收方法](#acceptance)。
 - [主管工作紀錄](OTA_TEST_RECORD.md)：本輪實測流程、成功依據與尚未演練項目。
 
@@ -564,6 +564,65 @@ journalctl --user -u facial-ota-poll.service -u facial-ota-setup.service --since
 6. 準備失敗保留原程式，啟動驗收失敗按原流程回退並寄失敗信；此時不能記成功。保留失敗歷史，核對 rollback 與實際收件，再決定修正版或明確 retry。
 
 共同紀錄每輪 tag、commit、attempt_id、phase／rollback、即時驗收與業務結果。正常成功不寄更新失敗信；pending=0 不單獨代表更新成功。故障啟動回退、SMTP 中斷補寄及斷電演練是另外的驗收範圍，不以本節正常更新通過代替。
+
+<a id="ota-v150-rc1"></a>
+
+### 5.7 本次 v1.5.0-rc.1：測試機可直接執行的驗收
+
+本次 RC 已獲管理者授權發布 tag；目前已完成的是工具維護與 tags 查詢，不是 RC app 更新驗收。工具來源為 b8c347e，測試機原 app 基準為 v1.4.0／PID 68818；agent_upgrade success、15 秒檢查 pass、NRestarts=0，並於 2026-10-30T15:40:38+08:00 回報 source=tags／query_ok=true／action=no_update。
+
+1. RC tag 推送後，讓原 poll 自行取得固定 commit，先查狀態與日誌：
+
+   ```bash
+   cd "$HOME/facial_recognition"
+   bash install.sh --ota-status
+   journalctl --user -u facial-ota-poll.service -u facial_recognition.service \
+     --since "30 minutes ago" -n 80 --no-pager
+   ```
+
+   last_poll=null 代表尚無已保存的查詢結果；現在再查一次狀態及日誌。source=tags／query_ok=true／action=no_update 表示那一輪沒有適用候選，不等於 RC 已安裝。一般等待下一輪即可；進行中的 preparing／validating 不重啟、不重跑 setup 或 retry。查詢間隔見第 5.5 節。
+2. 想確認本次有無重用環境，可唯讀查準備結果；自訂 state_dir 時請修改 root：
+
+   ```bash
+   python3 - <<'PY_RC_PREPARATION'
+   from pathlib import Path
+   import json
+   import sqlite3
+   root = Path.home() / ".local/share/facial-ota"
+   tag = "v1.5.0-rc.1"
+   db = sqlite3.connect((root / "agent.sqlite3").as_uri() + "?mode=ro", uri=True)
+   try:
+       row = db.execute(
+           "SELECT id,phase FROM attempts WHERE tag=? ORDER BY updated DESC LIMIT 1", (tag,)
+       ).fetchone()
+   finally:
+       db.close()
+   if row is None:
+       print("尚未建立本次 RC 作業")
+   else:
+       job = root / "releases" / (tag + "-" + row[0])
+       prepared = job / "preparation.json"
+       print("attempt_id:", row[0], "phase:", row[1])
+       print("preparation:", json.loads(prepared.read_text()) if prepared.is_file() else "尚無準備結果")
+       environment = job / "app/venv"
+       if environment.exists():
+           print("venv:", environment.resolve(), "symlink:", environment.is_symlink())
+   PY_RC_PREPARATION
+   ```
+
+   environment=reused 代表目標 wheel 與實際環境驗證通過並沿用 venv；created 代表另建。原始碼仍需經 Git 取得；這個結果不宣稱更新完全沒有網路流量，也不代替 app 健康驗收。
+3. selected_build.version 已是 v1.5.0-rc.1、latest_update 為該版 success 後，再做 15 秒即時驗收：
+
+   ```bash
+   cd "$HOME/facial_recognition"
+   bash install.sh --ota-check --expect-role test --expect-version v1.5.0-rc.1 --seconds 15
+   systemctl --user show facial_recognition.service -p MainPID -p NRestarts
+   ```
+
+   核對 selected_build.commit 是發布 tag 解析後的 SHA，build_id=v1.5.0-rc.1:該SHA、blocked=false、result=pass；RC 切換 app 後 PID 可以改變，之後應穩定。原專案 Git HEAD 不會因背景 OTA 跟著切到 RC，以選中 build 與即時 health 為準。
+4. 人工實測兩路影像、真人 IN／OUT、方向、語音、建檔照及特徵同步，再回報 --ota-status、--ota-check 與 preparation 結果。正常更新成功不寄失敗信；故障啟動回退仍另列待驗。
+
+正式機保持 production，應略過這個 RC；本次授權不包含正式 tag 或正式機工具維護／部署。
 
 <a id="release"></a>
 

@@ -2,7 +2,7 @@
 
 更新：2026-10-30，Australia/Adelaide。現場時間以輸出中的時區為準。這是接續工作的狀態摘要。
 
-最新：使用者已明確要求「請先commit、push」；本輪正在提交並推送 tag-only 工具分支（第 14 節），不建立 tag 或部署現場。GitHub Releases 已清空、8 個既有 Git tags 保留；兩機操作清單及 Git 工具取得流程見 README 第 5.6／6.4 節。
+最新：工具 commit b8c347e 已推送並在測試機完成維護、15 秒健康及 tags 查詢驗收；使用者已確認授權發布 v1.5.0-rc.1（第 15 節）。README 第 5.7 節補齊本次指令；RC app 更新與正式機維護／部署尚未驗收或執行。
 
 ## 1. 使用者最新決定與本輪範圍
 
@@ -234,3 +234,13 @@ caveman ponytail。
 - 本文件隨工具提交，記錄提交前狀態；最終 commit SHA 與推送成功應以 Git log、遠端分支及本輪完成回覆核對，不在同一提交內自指 SHA。
 - 提交包含 OTA 程式、deploy.json、對應測試、README、專案發布政策、RELEASE_NOTES 的 Unreleased 說明、最新交接及五條主管工作紀錄；舊 OTA_AI_HANDOVER.md 與 config.json.lock 留原處，不納入本輪提交。
 - 測試機目前只完成原 v1.4.0 基準回報，尚未維護 tag-only agent；分支推送後先核對該機 Git 分支／本機修改，依 README 第 6.4 節 pull 取得新版並執行 --ota-setup，再回報狀態／15 秒驗收。RC app 更新需另有獲授權的新 RC tag，不能將工具分支 push 視為已發布 RC。
+
+
+## 15. 2026-10-30 測試機工具遷移通過，RC tag 已獲授權
+
+- 工具 commit `b8c347e384ddb1624c3abc45e2f9e0e1b43504e8` 已提交、推送並由測試機 Git pull 取得。現場 origin 顯示 GitHub canonical repo 為 yangtandev/face_system；原 facial_recognition URL 仍可存取。
+- 測試機 agent_upgrade attempt `339b8fe1-d66a-4e14-93dd-a8f7f4932ba0` success、setup complete、discovery=tags；仍選中 v1.4.0、PID 68818、NRestarts=0、blocked=false、pending=0。15 秒唯讀檢查 pass、warnings=[]、兩路相機健康，辨識未因工具維護重啟。
+- 後續補回 last_poll：2026-10-30T15:40:38+08:00、query_ok=true、role=test、source=tags、moved_tags=[]、action=no_update。工具遷移及實際 tags 查詢驗收完成；不等於 RC app 更新已通過。
+- 已提出以 v1.4.0 為 stable 基準、功能改版目標 v1.5.0-rc.1，基於 b8c347e 的已測執行碼／8 模型／77 鎖定 wheels，僅更新 RC 說明與操作文件。遠端尚未使用此 tag，舊故障 v1.4.1-rc.1 不作新候選基底。
+- 使用者回覆「確定。這些測試指令都有記載README中嗎」，已授權候選說明 commit／push 及建立、推送 v1.5.0-rc.1；不需再問相同 tag 授權。README 第 5.7 節加入本次精確版號的狀態、日誌、唯讀 preparation／環境重用及 15 秒驗收指令。
+- 本文件隨 RC metadata commit 記錄發布前狀態；最終 tag／commit 與推送成功以 Git 及完成回覆核對。推 RC tag 後由測試機原 poll 自動更新，不建立 GitHub Release。正式機維持不操作，不推正式 tag；RC app 成功、業務實測與故障回退仍待現場回報。
