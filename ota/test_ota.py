@@ -38,15 +38,15 @@ class VersionTests(unittest.TestCase):
     def test_stable_promotion(self):
         self.assertEqual("v1.0.1", select_release([release("v1.0.1")], "test", "v1.0.1-rc.2")["tag_name"])
 
-    def test_production_excludes_rc_and_draft(self):
+    def test_production_excludes_rc_and_ignores_release_flags(self):
         releases = [release("v1.0.2-rc.1", True), release("v1.0.2", draft=True), release("v1.0.1")]
-        self.assertEqual("v1.0.1", select_release(releases, "production", "v1.0.0")["tag_name"])
+        self.assertEqual("v1.0.2", select_release(releases, "production", "v1.0.0")["tag_name"])
 
     def test_no_test_downgrade(self):
         self.assertIsNone(select_release([release("v1.0.1")], "test", "v1.0.2-rc.1"))
 
-    def test_inconsistent_flags(self):
-        self.assertIsNone(select_release([release("v1.0.1-rc.1"), release("v1.0.1", True)], "test", "v1.0.0"))
+    def test_tag_only_does_not_require_release_flags(self):
+        self.assertEqual("v1.0.1", select_release([{"tag_name": "v1.0.1-rc.1"}, {"tag_name": "v1.0.1"}], "test", "v1.0.0")["tag_name"])
 
     def test_failed_release_not_retried(self):
         self.assertIsNone(select_release([release("v1.0.1")], "production", "v1.0.0", {"v1.0.1"}))
@@ -673,28 +673,32 @@ class IntegrationTests(unittest.TestCase):
                "url": "https://api.github.com/repos/owner/repo/releases/assets/1"}]}
         return content, manifest, rel
 
-    def test_real_staging_isolated_environment_and_shared_links(self):
+    def test_legacy_package_preparation_isolated_environment_and_shared_links(self):
         content, manifest, rel = self.staged_bundle()
-        with patch("ota.updater.request", return_value=io.BytesIO(content)), patch("ota.updater.subprocess.run") as runner, \
+        target = self.root / "legacy-prepare"
+        target.mkdir()
+        (target / "package.tar.gz").write_bytes(content)
+        with patch("ota.updater.subprocess.run") as runner, \
              patch("ota.updater.subprocess.check_output", return_value="3.12\nx86_64\n"):
-            app, info = Agent.stage(self.agent, rel, manifest, str(uuid.uuid4()))
+            app, info = Agent.prepare(self.agent, target, manifest)
         self.assertTrue((app / "config.json").is_symlink())
         self.assertEqual(self.shared / "media", (app / "media").resolve())
         self.assertEqual("v1.0.1", info["version"])
         self.assertIn("--no-index", runner.call_args_list[1].args[0])
         self.assertEqual(self.old, self.agent.current()[0])
 
-    def test_staging_rejects_integrity_wrong_python_and_host_config(self):
-        for mode in ("checksum", "python", "host_config"):
+    def test_legacy_preparation_rejects_wrong_python_and_host_config(self):
+        for mode in ("python", "host_config"):
             content, manifest, rel = self.staged_bundle(mode == "host_config")
-            if mode == "checksum":
-                manifest["sha256"] = "0" * 64
-            elif mode == "python":
+            if mode == "python":
                 manifest["python"] = "3.10"
-            with self.subTest(mode=mode), patch("ota.updater.request", return_value=io.BytesIO(content)), \
-                 patch("ota.updater.subprocess.run") as runner, patch("ota.updater.subprocess.check_output", return_value="3.12\nx86_64\n"):
+            target = self.root / ("legacy-" + mode)
+            target.mkdir()
+            (target / "package.tar.gz").write_bytes(content)
+            with self.subTest(mode=mode), patch("ota.updater.subprocess.run") as runner, \
+                 patch("ota.updater.subprocess.check_output", return_value="3.12\nx86_64\n"):
                 with self.assertRaises(ValueError):
-                    Agent.stage(self.agent, rel, manifest, str(uuid.uuid4()))
+                    Agent.prepare(self.agent, target, manifest)
                 runner.assert_not_called()
 
     def test_name_lookup_failure_uses_cached_label(self):

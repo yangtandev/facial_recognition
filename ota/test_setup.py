@@ -195,14 +195,14 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(self.site, read_json(self.shared / "config.json"))
         self.assertEqual(0, setup.agent.store.outstanding())
 
-    def test_waiting_ignores_drafts_rc_flag_mismatches_and_wrong_projects(self):
+    def test_waiting_uses_tag_suffix_and_project_ignoring_release_flags(self):
         setup = self.waiting()
         releases = [{"tag_name": tag, "prerelease": pre, "draft": draft} for tag, pre, draft in (
             ("v1.4.0-rc.9", False, False), ("v1.4.0", True, False), ("v1.4.1", False, True), ("v1.3.9", False, False))]
         with patch("ota.updater.Agent.releases", return_value=releases), \
              patch("ota.updater.Agent.manifest", return_value={"projects": ["another-project"]}) as manifest:
             setup.agent.once()
-        self.assertEqual(1, manifest.call_count)
+        self.assertEqual(3, manifest.call_count)
         self.assertEqual("waiting_release", setup.agent.store.get("last_poll")["action"])
         self.assertEqual(0, setup.agent.store.outstanding())
 

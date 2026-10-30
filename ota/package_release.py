@@ -14,7 +14,7 @@ from ota.core import atomic_json, digest, migrate_config, read_json, version_key
 INCLUDE = {"main.py", "analytics_reporter.py", "install.sh", "requirements.txt", "README.md",
            "RELEASE_NOTES.md", "init", "models", "other", "ui", "web_ui", "setting", "py_ssh", "ota"}
 REQUIRED = ("main.py", "requirements.txt", "ota/__init__.py", "ota/core.py", "ota/health.py", "py_ssh/ssh.py",
-            "ota/updater.py", "ota/notifications.py", "ota/configure.py", "ota/install_agent.py", "ota/setup.py", "ota/diagnostics.py", "ota/agent.example.json",
+            "ota/updater.py", "ota/tag_source.py", "ota/notifications.py", "ota/configure.py", "ota/install_agent.py", "ota/setup.py", "ota/diagnostics.py", "ota/agent.example.json",
             "models/data/20180402-114759-vggface2.pt", "other/pvms_Library-0.0.2b0-py3-none-any.whl",
             "setting/ota_migrations.json")
 

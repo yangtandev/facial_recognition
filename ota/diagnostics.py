@@ -43,14 +43,15 @@ def preflight(project):
     if os.geteuid() == 0:
         errors.append("請使用桌面服務帳號，不要用 root／sudo")
     if platform.system() != "Linux" or sys.version_info < (3, 10):
-        errors.append("需要 Linux 與 Python 3.10+；應用程式另須符合 Release 的 Python minor／CPU")
+        errors.append("需要 Linux 與 Python 3.10+；應用程式另須符合 tag 部署清單的 Python minor／CPU")
     return {"result": "fail" if errors else "info", "errors": errors,
             "user": getpass.getuser(), "home": str(Path.home()), "os": operating_system,
             "architecture": platform.machine(), "python": platform.python_version(),
             "interpreter": sys.executable, "free_gib": round(shutil.disk_usage(project).free / 1024**3, 1),
             "gpu": gpu, "project": str(project), "config_exists": (project / "config.json").exists(),
-            "next": "已有 config：勿重跑完整安裝" if (project / "config.json").exists() else "全新主機：先確認適用 Release 及現場參數",
-            "note": "僅環境資訊；未測 GitHub／SMTP／相機連線、venv 及 Release 相容性"}
+            "git_available": bool(shutil.which("git")), "git_lfs_available": bool(shutil.which("git-lfs")),
+            "next": "已有 config：勿重跑完整安裝" if (project / "config.json").exists() else "全新主機：先確認適用 tag 契約及現場參數",
+            "note": "僅環境資訊；未測 GitHub／SMTP／相機連線、venv 及部署契約相容性；tag 取碼需 Git，缺模型時需 Git LFS"}
 
 
 def services():

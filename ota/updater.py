@@ -1,5 +1,6 @@
 """Independent user-service agent. No git pull, inbound SSH or application deps."""
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -150,11 +151,12 @@ class Agent:
         if self.config["role"] == "production":
             for release in releases:
                 try:
-                    if not release.get("draft") and not version_key(release["tag_name"])[3]:
+                    if not version_key(release["tag_name"])[3]:
                         skipped.append(release["tag_name"])
                 except (TypeError, KeyError, ValueError):
                     pass
         summary = {"checked_at": timestamp(), "query_ok": True, "role": self.config["role"],
+                   "source": "tags", "moved_tags": [value["tag_name"] for value in releases if value.get("moved")],
                    "rc_skipped": skipped[:20], "rc_skipped_count": len(skipped)}
         return releases, summary
 
@@ -180,6 +182,9 @@ class Agent:
                 continue
             try:
                 manifest = self.manifest(candidate)
+                if manifest is None:
+                    releases.remove(candidate)
+                    continue
                 if "*" not in manifest["projects"] and identity["project"] not in manifest["projects"]:
                     releases.remove(candidate)
                     continue
@@ -240,7 +245,8 @@ class Agent:
         sync_directory(self.root)
 
     def releases(self):
-        base = "https://api.github.com/repos/" + self.config["repo"] + "/releases"
+        # The tags endpoint returns the peeled commit for lightweight/annotated tags.
+        base = "https://api.github.com/repos/" + self.config["repo"] + "/tags"
         url, result, pages = base + "?per_page=100", [], 0
         while url:
             if not url.startswith(base + "?"):
@@ -273,74 +279,79 @@ class Agent:
                     self.store.set("poll_after", time.time() + delay)
                     raise
             if not isinstance(cached.get("body"), list):
-                raise ValueError("Unexpected GitHub releases response")
+                raise ValueError("Unexpected GitHub tags response")
             result.extend(cached["body"])
             url = cached.get("next")
             pages += 1
             if pages >= 100 and url:
-                raise ValueError("Too many release pages; refusing partial discovery")
-        return result
+                raise ValueError("Too many tag pages; refusing partial discovery")
+        candidates = []
+        try:
+            baseline = self.current()[1]
+            if re.fullmatch(r"[0-9a-f]{40}", baseline.get("commit", "")):
+                self.pin_tag(baseline["version"], baseline["commit"])
+        except RuntimeError:
+            pass
+        for tag in result:
+            name = tag.get("name", "")
+            try:
+                version_key(name)
+            except (TypeError, ValueError):
+                continue
+            if not name.startswith("v"):
+                continue
+            commit = tag.get("commit", {}).get("sha", "")
+            if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+                raise ValueError("Tag has no resolved commit identity")
+            original = self.pin_tag(name, commit)
+            candidates.append({"tag_name": name, "commit": commit, "moved": original != commit})
+        return candidates
 
-    def asset(self, release, name):
-        found = [asset for asset in release.get("assets", []) if asset.get("name") == name and asset.get("state") == "uploaded"]
-        if len(found) != 1:
-            raise ValueError("Missing or ambiguous Release asset")
-        asset = found[0]
-        prefix = "https://api.github.com/repos/" + self.config["repo"] + "/releases/assets/"
-        if not re.fullmatch(re.escape(prefix) + r"\d+", asset.get("url", "")):
-            raise ValueError("Unexpected asset API origin")
-        return asset
+    def pin_tag(self, name, commit):
+        key = "tag:" + self.config["repo"] + ":" + name
+        original = self.store.get(key)
+        if original is None:
+            self.store.set(key, commit)
+        return original or commit
 
     def manifest(self, release):
-        asset = self.asset(release, "release.json")
-        with request(asset["url"], self.config.get("github_token", ""),
-                     headers={"Accept": "application/octet-stream"}) as response:
-            value = json.loads(response.read(65536))
-        if not isinstance(value, dict):
-            raise ValueError("Release manifest must be an object")
-        if value.get("version") != release["tag_name"] or type(value.get("config_schema")) is not int or value["config_schema"] != 1:
-            raise ValueError("Version/config schema mismatch")
-        if type(value.get("data_schema")) is not int or value["data_schema"] != 1:
-            raise ValueError("Unsupported business-data migration; manual migration required")
-        if not re.fullmatch(r"[0-9a-f]{64}", value.get("sha256", "")):
-            raise ValueError("Missing archive checksum")
-        name = value.get("archive", "")
-        if not re.fullmatch(r"[A-Za-z0-9_.-]+\.tar\.gz", name):
-            raise ValueError("Invalid archive filename")
-        projects = value.get("projects")
-        if not isinstance(projects, list) or not projects or not all(isinstance(p, str) for p in projects):
-            raise ValueError("Explicit project applicability required")
-        return value
+        from ota.tag_source import CONTRACT, validate
+        commit = release["commit"]
+        if (not re.fullmatch(r"[0-9a-f]{40}", commit) or release.get("moved")
+                or self.pin_tag(release["tag_name"], commit) != commit):
+            raise ValueError("Previously observed tag moved; use a new version")
+        cache_key = "contract:" + self.config["repo"] + ":" + commit
+        cached = self.store.get(cache_key)
+        if cached is None:
+            url = ("https://api.github.com/repos/" + self.config["repo"] + "/contents/"
+                   + CONTRACT + "?ref=" + commit)
+            try:
+                with request(url, self.config.get("github_token", ""),
+                             headers={"Accept": "application/vnd.github.raw+json"}) as response:
+                    raw = response.read(1024**2 + 1)
+                if len(raw) > 1024**2:
+                    raise ValueError("Tag deployment contract exceeds size limit")
+                value = validate(json.loads(raw))
+                cached = {"value": value, "sha256": hashlib.sha256(raw).hexdigest()}
+            except urllib.error.HTTPError as error:
+                if error.code != 404:
+                    raise
+                cached = {"absent": True}
+            self.store.set(cache_key, cached)
+        if cached.get("absent"):
+            return None  # Historical tags, including the old intentional failure RC.
+        value = validate(cached["value"])
+        return {**value, "version": release["tag_name"], "commit": commit,
+                "build_id": release["tag_name"] + ":" + commit, "sha256": cached["sha256"]}
 
     def stage(self, release, manifest, attempt, compare_baseline=True):
-        self.target_python(manifest)  # Fail before downloading a large incompatible package.
-        target = self.root / "releases" / (release["tag_name"] + "-" + attempt)
-        target.mkdir(parents=True, mode=0o700)
-        archive = target / "package.tar.gz"
-        asset = self.asset(release, manifest["archive"])
-        size = int(manifest["size"])
-        if size <= 0 or size != asset.get("size") or size > int(self.config.get("max_archive_bytes", 5 * 1024**3)):
-            raise ValueError("Archive size mismatch/limit")
-        if shutil.disk_usage(target).free < size * 5 + int(self.config.get("min_free_bytes", 1024**3)):
-            raise RuntimeError("Insufficient space for package and isolated environment")
-        total = 0
-        with request(asset["url"], self.config.get("github_token", ""),
-                     headers={"Accept": "application/octet-stream"}, timeout=60) as response, open(archive, "xb") as output:
-            while chunk := response.read(1024**2):
-                total += len(chunk)
-                if total > size:
-                    raise ValueError("Archive larger than manifest")
-                output.write(chunk)
-            output.flush()
-            os.fsync(output.fileno())
-        if total != size or digest(archive) != manifest["sha256"]:
-            raise ValueError("Archive integrity check failed")
-        return self.prepare(target, manifest, compare_baseline=compare_baseline)
+        from ota.tag_source import stage
+        return stage(self, release, manifest, attempt, compare_baseline)
 
     def target_python(self, manifest):
         minor = manifest.get("python", "")
         if not isinstance(minor, str) or not re.fullmatch(r"3\.[0-9]{1,2}", minor) or int(minor.split(".")[1]) < 10:
-            raise ValueError("Invalid Release Python version")
+            raise ValueError("Invalid target Python version")
         candidates = [self.config.get("python", "python3"), "python" + minor]
         for candidate in dict.fromkeys(candidates):
             try:
@@ -352,7 +363,7 @@ class Agent:
                 text=True, timeout=30).splitlines()
             if value == [minor, manifest.get("architecture")]:
                 return executable
-        raise ValueError("No installed system Python/CPU matches Release wheelhouse; original service is unchanged")
+        raise ValueError("No installed system Python/CPU matches tag contract; original service is unchanged")
 
     def prepare(self, target, manifest, compare_baseline=True):
         archive = target / "package.tar.gz"
@@ -465,6 +476,11 @@ class Agent:
                 for key in keys:
                     if key in data:
                         protected.add(Path(data[key]).resolve())
+        # A newer app may use an older immutable venv. Keep its owning release.
+        for app in tuple(protected):
+            environment = app / "venv"
+            if environment.exists():
+                protected.add(environment.resolve())
         removed = []
         for row in rows:
             if row["phase"] == "rollback_failed":
@@ -580,6 +596,9 @@ class Agent:
                         "rollback": "not_needed", "service_healthy": baseline_healthy}, identity)
                     self.poll_record(poll, "manifest_failed", selected_version=candidate["tag_name"])
                     break
+                if manifest is None:
+                    releases.remove(candidate)
+                    continue
                 if "*" in manifest["projects"] or identity["project"] in manifest["projects"]:
                     self.poll_record(poll, "update_selected", selected_version=candidate["tag_name"])
                     if candidate["tag_name"] == retry:
@@ -639,7 +658,7 @@ class Agent:
             selected = None
         path = self.root / "setup.json"
         setup = read_json(path) if path.is_file() else {}
-        return {"selected_build": selected, "setup": {key: setup[key] for key in
+        return {"discovery": "tags", "selected_build": selected, "setup": {key: setup[key] for key in
                 ("phase", "target_version", "error", "rollback", "rollback_error", "backup_dir") if key in setup},
                 "pending": self.store.outstanding(), "latest_update": self.store.latest_summary(),
                 "enrollment_state": "waiting_release" if self.waiting() else ("managed" if selected else "not_enrolled"),

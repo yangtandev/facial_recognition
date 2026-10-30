@@ -1,4 +1,4 @@
-"""Durable storage, release selection and safe filesystem/network primitives."""
+"""Durable storage, tag selection and safe filesystem/network primitives."""
 import contextlib
 import copy
 from datetime import datetime, timezone
@@ -41,9 +41,7 @@ def select_release(releases, role, current, failed=()):
             continue
         if not release["tag_name"].startswith("v"):
             continue
-        if release.get("draft") or release["tag_name"] in failed:
-            continue
-        if release.get("prerelease") is not (not key[3]):
+        if release["tag_name"] in failed:
             continue
         if role == "production" and not key[3]:
             continue
@@ -399,7 +397,7 @@ class Store:
                 return {}
             data = json.loads(row["data"])
             return {"attempt_id": row["id"], "phase": row["phase"], **{key: data[key] for key in
-                ("target_version", "from_version", "rollback", "error", "rollback_error", "failed_at",
+                ("target_version", "from_version", "operation", "rollback", "error", "rollback_error", "failed_at",
                  "rollback_started_at", "rollback_failed_at", "rollback_completed_at") if key in data}}
 
 

@@ -84,12 +84,16 @@ class Setup:
         project = self.agent.identity()["project"]
         if project == "unknown":
             raise ValueError("Cannot determine project; check Server.API_url and location_ID")
+        # Automatic dispatch already checked failures/retry before consuming retry.
         while candidate := select_release(releases, self.agent.config["role"], "v0.0.0"):
             manifest = self.agent.manifest(candidate)
+            if manifest is None:
+                releases.remove(candidate)
+                continue
             if "*" in manifest["projects"] or project in manifest["projects"]:
                 return candidate, manifest
             releases.remove(candidate)
-        raise RuntimeError("No published Release applies to this role/project; complete Release assets are required")
+        raise RuntimeError("No deployable Git tag applies to this role/project; ota/deploy.json is required")
 
     def original(self):
         agent = self.agent

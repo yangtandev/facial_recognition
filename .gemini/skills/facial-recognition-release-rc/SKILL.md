@@ -55,24 +55,30 @@ and record its identity. Executable, model, or dependency changes require a new
 candidate and testing. Version naming alone does not constitute deployment
 approval. Verify the final tag, source commit, and release-note entry agree.
 
-## GitHub publication gate
+## Git tag publication gate
 
-Hosts discover updates directly from this repository's GitHub Releases.
-Pushing a commit or tag does not authorize an OTA update.
+Hosts using the tag-only updater discover Git tags, not GitHub Releases.
+Existing Release-based agents require one-time tool maintenance before migration.
 
-- Publish RC releases with `prerelease: true` and stable releases with
-  `prerelease: false`. Draft releases are not eligible for OTA.
-- Publishing a stable Release with its complete verified assets is the manual
-  production approval step, after the candidate passed testing.
-- Check both the SemVer tag and GitHub release flags; reject inconsistent
-  combinations such as an RC tag marked as a stable release.
-- Select eligible versions by SemVer, not GitHub list order or publication
-  date. Test hosts consider both RC and stable releases; production hosts
-  consider only stable releases. Keep the active release lineage in scope.
-- Each host keeps its update audit and durable failure-email queue locally.
-  It sends failure notifications directly through SMTP; no management server
-  or device enrollment token is required. Camera connectivity alone must not
-  fail update validation or trigger a rollback.
+- A deployable tag must contain the versioned `ota/deploy.json` contract: explicit
+  projects, Python/CPU, schemas, configuration defaults, requirements identity,
+  complete locked wheels and model sizes/SHA256. Historical tags without it are
+  not deployment candidates. Never promote an intentional failure candidate.
+- Pushing an approved stable tag is the manual production approval step, after
+  candidate testing. Do not push stable tags before production authorization.
+  A branch commit or GitHub Release publication alone is not the new gate.
+- Parse RC/stable eligibility from SemVer suffixes. Release flags, drafts and
+  assets do not participate. Annotated/lightweight tags resolve to fixed commits;
+  persist observed identities and reject moved tags. Never reuse a pushed tag.
+- Select by numeric SemVer, role, project and contract, not API order. Test hosts
+  consider RC/stable tags; production only stable tags. No ordinary downgrades
+  or infinite automatic retries of failed versions.
+- Verify models and full environments before reuse; changed dependencies get a
+  separate environment and verified cached/missing wheels. Never modify the
+  running or rollback environment with pip.
+- Preserve host-local audit, health checks, durable failure-email queues,
+  checkpoint recovery and rollback. Camera connectivity alone must not fail
+  update validation or trigger rollback.
 
 ## Deployment eligibility
 
@@ -84,7 +90,7 @@ Pushing a commit or tag does not authorize an OTA update.
   project. Each host updates independently; one host's failure does not block
   unrelated hosts.
 - The independent updater applies its enrolled role and any project-targeting
-  policy to published GitHub releases. Do not implement production eligibility
+  policy to Git tags carrying the deployment contract. Do not implement production eligibility
   as an unrestricted search for the highest Git tag.
 - A failed update may restore an older known-good release without violating
   release immutability; rollback does not create or rewrite a release tag.
