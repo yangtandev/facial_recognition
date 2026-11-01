@@ -10,6 +10,7 @@
 - [首次接入 OTA](#ota-enrollment)：一次指令自動準備、驗收及啟用。
 - [多台主機共用設定](#fleet-profile)：匯出私有部署設定，省去逐台輸入帳密。
 - [本次 v1.5.0-rc.1 驗收指令](#ota-v150-rc1)、[一台測試機＋一台正式機的 OTA 測試步驟](#two-host-ota)：測試機收 RC／正式版，正式機只收正式版。
+- [正式機實測略過 v1.5.0-rc.1](#production-skip-v150-rc1)：查到 RC 仍保留原正式版本，通過後才安排正式版放行。
 - [運作範例](#runtime-flow)、[發布更新](#release)、[故障處理](#operations)、[驗收方法](#acceptance)。
 - [主管工作紀錄](OTA_TEST_RECORD.md)：本輪實測流程、成功依據與尚未演練項目。
 
@@ -528,7 +529,7 @@ journalctl --user -u facial-ota-poll.service -u facial-ota-setup.service --since
 
    成功判準：selected_build 的 version／commit／build_id 對應開發端提供的 RC tag／SHA，最新 app 作業目標為該 RC、phase=success、blocked=false；即時兩次取樣核心與 MQTT／同步正常、必要計數前進。再實測兩路影像、真人 IN／OUT、方向、語音、建檔照／特徵同步。相機暫離線的 warning 不算業務已全部驗完。
 4. 同時依下節查正式機：確實查到且略過這個 RC，仍跑原正式 commit。RC 出問題就修正、用新的 rc.N 重測，不移動原 tag、不把測試機改成 production。
-5. RC 業務驗收通過，管理者確認正式機可短暫切換後，開發端才推同目標正式 tag；正式 commit 的執行碼、模型、依賴及遷移需與已測 RC 一致，僅版本／說明 metadata 可另審。不要在驗完這次正式版前先讓測試機跳到更高版本的下一輪 RC。
+5. 測試機 RC 業務驗收及正式機實際略過同一 RC 均通過，管理者確認正式機可短暫切換後，開發端才推同目標正式 tag；正式 commit 的執行碼、模型、依賴及遷移需與已測 RC 一致，僅版本／說明 metadata 可另審。不要在驗完這次正式版前先讓測試機跳到更高版本的下一輪 RC。
 6. 測試機維持 test，會再自動更新到正式 tag 的 commit。成功後驗正式版：
 
    ```bash
@@ -569,7 +570,7 @@ journalctl --user -u facial-ota-poll.service -u facial-ota-setup.service --since
 
 ### 5.7 本次 v1.5.0-rc.1：測試機可直接執行的驗收
 
-本次 RC 已獲管理者授權發布 tag；目前已完成的是工具維護與 tags 查詢，不是 RC app 更新驗收。工具來源為 b8c347e，測試機原 app 基準為 v1.4.0／PID 68818；agent_upgrade success、15 秒檢查 pass、NRestarts=0，並於 2026-10-30T15:40:38+08:00 回報 source=tags／query_ok=true／action=no_update。
+本次 RC 已發布，測試機由 v1.4.0 更新成功：commit=7893ac292f5d49b89faa8df17c1222b30ce5ccc0、attempt_id=680b0242-f512-40f1-97c6-db863f7e4872、PID=108632。使用者回報 15 秒驗收 pass、三服務 active／enabled、warnings=[]、preparation.environment=reused，並確認人工業務測試全數正常。以下保留驗收指令；正式機實際略過 RC 的通過結果見第 5.8 節，故障啟動回退未由此次成功更新驗證。
 
 1. RC tag 推送後，讓原 poll 自行取得固定 commit，先查狀態與日誌：
 
@@ -622,7 +623,69 @@ journalctl --user -u facial-ota-poll.service -u facial-ota-setup.service --since
    核對 selected_build.commit 是發布 tag 解析後的 SHA，build_id=v1.5.0-rc.1:該SHA、blocked=false、result=pass；RC 切換 app 後 PID 可以改變，之後應穩定。原專案 Git HEAD 不會因背景 OTA 跟著切到 RC，以選中 build 與即時 health 為準。
 4. 人工實測兩路影像、真人 IN／OUT、方向、語音、建檔照及特徵同步，再回報 --ota-status、--ota-check 與 preparation 結果。正常更新成功不寄失敗信；故障啟動回退仍另列待驗。
 
-正式機保持 production，應略過這個 RC；本次授權不包含正式 tag 或正式機工具維護／部署。
+正式機保持 production，接續下節實測略過這個 RC；尚未發布 v1.5.0 正式 tag。
+
+<a id="production-skip-v150-rc1"></a>
+
+### 5.8 本次 v1.5.0-rc.1：正式機實測略過 RC
+
+目的：正式機確實查到已發布的 RC，仍運行原辨識來源。不能用「沒有更新」或舊 updater 查不到 GitHub Release 代替驗收；正式版放行前，測試機 RC 正常更新與正式機 RC 略過都須通過。
+
+1. 在正式機的原桌面帳號，先唯讀盤點並保留輸出；最新現場回報為 gini@WS-1，不套用先前 Gini-MediaServer 的版本／PID 紀錄：
+
+   ```bash
+   cd "$HOME/facial_recognition"
+   bash install.sh --ota-status
+   systemctl --user show facial_recognition.service -p MainPID -p NRestarts
+   git status --short
+   git branch --show-current
+   git log -1 --format='%H %D'
+   systemctl --user show facial_recognition.service -p WorkingDirectory
+   systemctl --user is-active facial-ota-poll.service facial-ota-notify.service
+   ```
+
+   WS-1 已回報：Git HEAD=c831bbdc434a328caf12d09fd1ccc70104a565ea，辨識 WorkingDirectory=/home/gini/facial_recognition、MainPID=2417、NRestarts=0；poll／notify 均 inactive，selected_build=null、setup={}，尚未接入 OTA。角色 production，使用本機 ota/agent.local.json 與 /home/gini/.local/share/facial-ota；這不是已納管 v1.4.0 的證據。PID／NRestarts 仍須以執行當下為準。若有進行中的更新／接入或 blocked=true，先排查。
+2. WS-1 的辨識仍直接使用專案目錄，依第 4.1 節只取已發布固定 commit 的工具，不對整個 app 做 git pull／switch。無待保留的工具修改、沒有進行中的作業，才備份並取得工具；既有 agent.local.json 保留：
+
+   ```bash
+   cd "$HOME/facial_recognition" &&
+   FACIAL_OTA_TOOLS_COMMIT=7893ac292f5d49b89faa8df17c1222b30ce5ccc0 &&
+   FACIAL_OTA_TOOLS_BACKUP=$(mktemp -d "$HOME/facial-ota-tools.XXXXXX") &&
+   cp -a ota install.sh "$FACIAL_OTA_TOOLS_BACKUP/" &&
+   git fetch --no-tags origin "$FACIAL_OTA_TOOLS_COMMIT" &&
+   test "$(git rev-parse FETCH_HEAD)" = "$FACIAL_OTA_TOOLS_COMMIT" &&
+   git archive --format=tar --output="$FACIAL_OTA_TOOLS_BACKUP/tools.tar" "$FACIAL_OTA_TOOLS_COMMIT" -- ota install.sh &&
+   tar -xf "$FACIAL_OTA_TOOLS_BACKUP/tools.tar" -C "$PWD" &&
+   python3 -m ota.setup --help
+   ```
+
+   任一步報錯就停止。這是從 Git 只取工具，不需人工下載工具包；Git HEAD 與 app 執行碼保持原來源，git status 出現工具修改是此操作的預期結果，不還原或強制 reset。備份含私有設定，不上傳。已完成 tag-only 遷移的主機跳過此步。
+3. 核對遠端尚無待放行的適用正式 tag、角色仍 production 後，接入待命或維護獨立 agent。啟用 poll 後若已有適用正式 tag，就會自行安裝，不能一律保證只待命：
+
+   ```bash
+   cd "$HOME/facial_recognition"
+   bash install.sh --ota-setup &&
+   bash install.sh --ota-status &&
+   bash install.sh --ota-check --expect-role production --seconds 15
+   systemctl --user show facial_recognition.service -p MainPID -p NRestarts
+   ```
+
+   WS-1 預期 setup.phase／enrollment_state／診斷 result=waiting_release，selected_build=null；不加 --expect-version，也不把舊來源偽造為 v1.4.0。這只證明已啟用待命與原程序穩定，業務仍須人工確認。若原本已納管正式版，則核對保留原 version／commit、診斷 pass。discovery=tags 單一欄位不夠，還須看下一步實際 poll 的 source／query_ok。
+   首輪若碰到 setup 仍 active，會略過並等待下一輪；未設 token 時預設間隔至少 1200 秒，另加 0～10 秒。補設 token 依第 3.1 節，既有等待不立即縮短；只有確認仍待命且無更新／接入進行中，才依該節只重啟 poll 載入新設定。
+4. 等原 poll 完成一輪新的成功查詢，再唯讀驗收；查詢間隔見第 5.5 節，不重啟 poll 催查：
+
+   ```bash
+   cd "$HOME/facial_recognition"
+   bash install.sh --ota-status
+   bash install.sh --ota-check --expect-role production --seconds 15
+   systemctl --user show facial_recognition.service -p MainPID -p NRestarts
+   journalctl --user -u facial-ota-poll.service --since "30 minutes ago" -n 80 --no-pager
+   ```
+
+   通過須同時符合：last_poll.role=production、source=tags、query_ok=true、checked_at 為本次新查詢、rc_skipped 包含 v1.5.0-rc.1。WS-1 的 action 應為 waiting_release、selected_build=null、診斷 result=waiting_release，原服務 WorkingDirectory／MainPID／NRestarts 與盤點相同；已納管主機則為 action=no_update、原正式 version／commit 不變、診斷 pass。兩種狀態都須 blocked=false、三服務 active／enabled、原辨識與同步持續正常，且沒有目標為該 RC 的 app 更新作業。工具維護可新增 agent_upgrade 紀錄，待命接入可新增 waiting_release 紀錄；均不等於安裝新版 app。
+5. 保留兩次 status／PID 輸出與 15 秒驗收，記錄 RC 隔離技術驗收；原辨識業務持續正常仍由現場人工確認。若尚未查詢、查詢失敗、仍為舊 source 或 rc_skipped 沒有本次 RC，保留待驗；不改成 test、不強制安裝 RC、不推正式 tag 來替代這項測試。正式 tag 仍須另外取得放行。
+
+本輪現場結果（依使用者回報）：WS-1 待命接入成功，備份 attempt=7b3e2d47-0bd2-4b66-b577-b004155f379f，三服務 active／enabled，15 秒診斷 result=waiting_release。補設 GitHub token 後，last_poll.checked_at=2026-11-01T23:46:49+08:00、role=production、source=tags、query_ok=true、rc_skipped 包含 v1.5.0-rc.1（共略過 5 個 RC）、action=waiting_release；selected_build=null、pending=0、blocked=false。辨識 PID=2417／NRestarts=0 與接入前相同，健康快照核心／外部／兩路相機正常。因此本輪 RC 隔離技術驗收通過；不是已安裝 v1.4.0 或 v1.5.0，也不代替正式版更新後的業務驗收。journalctl 最近兩分鐘無紀錄，不否定較早已保存的成功查詢；正式版 tag 仍待放行。
 
 <a id="release"></a>
 

@@ -1,8 +1,8 @@
 # OTA tag-only 改版交接
 
-更新：2026-10-30，Australia/Adelaide。現場時間以輸出中的時區為準。這是接續工作的狀態摘要。
+更新：2026-11-02，Australia/Adelaide。現場時間以輸出中的時區為準。這是接續工作的狀態摘要。
 
-最新：工具 commit b8c347e 已推送並在測試機完成維護、15 秒健康及 tags 查詢驗收；使用者已確認授權發布 v1.5.0-rc.1（第 15 節）。README 第 5.7 節補齊本次指令；RC app 更新與正式機維護／部署尚未驗收或執行。
+最新：v1.5.0-rc.1 已發布至 commit 7893ac292f5d49b89faa8df17c1222b30ce5ccc0；測試機更新、15 秒健康、venv 重用及人工業務驗收通過。正式機最新回報為 WS-1，原來源 c831bbd、尚未納管版本；已接入 waiting_release，成功查 tags 並略過該 RC，PID 2417／NRestarts 0 不變。詳第 16 節及 README 第 5.7～5.8 節；先前各節是當時紀錄。正式 tag／正式 app 更新尚未放行或執行，故障啟動回退仍未完成。
 
 ## 1. 使用者最新決定與本輪範圍
 
@@ -19,7 +19,7 @@
 1. 讀本文件、`AGENTS.md`、適用 skills；檢查 Git 與未提交變更，不重做已完成工作。
 2. **現場重試結果已收齊。** attempt `6e65daa0-9840-4a0e-816a-c625a3507f97`，phase=failed、rollback=not_needed；實際下載 671088640／943117577 bytes，未切換。使用者另回報 selected_build=v1.4.0、blocked=false、pending=0，last_health 快照核心／外部／相機全綠、PID 68818，並確認本次失敗郵件實際收到。這不是完整回退通過，也不是 AI 直接取得的即時健康。
 3. 若仍在更新，保留原作業；不要為改版中止它、重啟 poll 或重跑 retry。
-4. 本機實作與驗證見第 11 節；下一步僅按 README 第 6.4 節安排測試機工具維護，再規劃獲授權的新 tag 現場驗收。沒有遠端操作測試／正式機的工具，現場需使用者執行指令；不得聲稱代執行。
+4. 本機實作與驗證見第 11 節，最新兩機 RC 驗收見第 16 節，不重做已完成的工具維護或 RC 發布。下一步可準備同目標正式版；正式 tag 放行與正式機 app 安裝仍須相應授權。沒有遠端操作測試／正式機的工具，現場需使用者執行指令；不得聲稱代執行。
 
 ## 3. 工作目錄與 Git 狀態（本輪重新核對）
 
@@ -244,3 +244,15 @@ caveman ponytail。
 - 已提出以 v1.4.0 為 stable 基準、功能改版目標 v1.5.0-rc.1，基於 b8c347e 的已測執行碼／8 模型／77 鎖定 wheels，僅更新 RC 說明與操作文件。遠端尚未使用此 tag，舊故障 v1.4.1-rc.1 不作新候選基底。
 - 使用者回覆「確定。這些測試指令都有記載README中嗎」，已授權候選說明 commit／push 及建立、推送 v1.5.0-rc.1；不需再問相同 tag 授權。README 第 5.7 節加入本次精確版號的狀態、日誌、唯讀 preparation／環境重用及 15 秒驗收指令。
 - 本文件隨 RC metadata commit 記錄發布前狀態；最終 tag／commit 與推送成功以 Git 及完成回覆核對。推 RC tag 後由測試機原 poll 自動更新，不建立 GitHub Release。正式機維持不操作，不推正式 tag；RC app 成功、業務實測與故障回退仍待現場回報。
+
+## 16. 2026-11-02 兩機 RC 驗收結果與正式機 WS-1 待命
+
+- 已授權發布的 v1.5.0-rc.1 指向 7893ac292f5d49b89faa8df17c1222b30ce5ccc0，分支與 annotated tag 已推送；未建立 GitHub Release，未推 v1.5.0 正式 tag。
+- 測試機 app attempt=680b0242-f512-40f1-97c6-db863f7e4872，由 v1.4.0 更新至該 RC 成功；selected_build／build ID／commit 相符、PID=108632，15 秒診斷 pass、三服務 active／enabled、warnings=[]。preparation.json 的 source_commit 相符、environment=reused；使用者另確認兩路影像、真人 IN／OUT、方向、語音、建檔照及特徵同步「全數正常」。測試機 RC 正常更新與業務驗收完成。
+- 使用者要求正式機也實測「發布 RC 應查到但略過」。最新操作主機為 gini@WS-1，不套用 Gini-MediaServer 已納管 v1.4.0 的歷史狀態；是否為同機改名未確認。WS-1 原 Git HEAD=c831bbdc434a328caf12d09fd1ccc70104a565ea、WorkingDirectory=/home/gini/facial_recognition、PID=2417／NRestarts=0，production，poll／notify 原 inactive，selected_build=null、setup={}。
+- 因 app 直接從原專案運行，使用固定 commit 7893ac2 只取得 ota/ 與 install.sh，保留 agent.local.json／app／venv；不整個 git pull／switch。接著使用者執行 --ota-setup，待命接入 attempt=7b3e2d47-0bd2-4b66-b577-b004155f379f 成功，三服務 active／enabled、15 秒診斷 result=waiting_release；PID／重啟數不變。selected_build=null、version/build_id=unknown 是 legacy 尚未安裝首個正式套件，不偽造 v1.4.0。
+- 首輪 last_poll=null；當時無 token、間隔 1200～1210 秒，setup 已 inactive。使用者透過 --ota-config-only 補設 token，保留 production／repo／SMTP。不可輸出或提交 token；Git 登入與 agent 的 github_token 是不同設定。
+- 正式機最終回報 last_poll.checked_at=2026-11-01T23:46:49+08:00（Adelaide 2026-11-02T02:16:49+10:30）、query_ok=true、role=production、source=tags、moved_tags=[]、rc_skipped 包含 v1.5.0-rc.1，共略過 5 個 RC，action=waiting_release。selected_build=null、latest_update={}、pending=0、blocked=false、cleanup_error=null，PID=2417／NRestarts=0；健康快照核心／外部／兩路相機全綠。此為使用者貼回的現場證據，AI 未直接連線觀察。
+- 結論：測試機會更新本輪 RC，正式機成功查到並略過 RC，角色隔離技術驗收通過。最終 journalctl 的兩分鐘視窗無紀錄，不否定較早已保存的查詢；WS-1 接入後人工業務未另回報，不把健康快照當真人辨識實測。
+- README 第 5.7 更新測試機實測結果，第 5.8 補齊 WS-1 唯讀盤點、只取工具、待命接入及 RC 略過判準，並將兩機 RC 驗收列為正式放行前置。使用者已要求本輪文件 commit／push，本節與 README、RELEASE_NOTES 的驗收說明一併提交；此授權不含新 tag 或正式 app 部署。ignored 現場證據保存在 ota/dist/candidate-v1.5.0-rc.1/，不納入提交。
+- 下一步可準備 v1.5.0 正式晉升的具體差異與測試機／正式機驗收步驟，保持已測 app 執行碼、模型、依賴與遷移一致；發布正式 tag 等於 production 放行，仍待使用者指示。故障 RC 真實啟動回退、實體斷電／程序中斷未由本輪正常更新或 RC 略過驗證。
