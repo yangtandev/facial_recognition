@@ -2,7 +2,7 @@
 
 更新：2026-11-02，Australia/Adelaide。現場時間以輸出中的時區為準。這是接續工作的狀態摘要。
 
-最新：兩機 v1.5.0（e8da0fc6e0159d4ad97183a2c2c2ad5cdbf2c521）正常更新、健康及人工業務驗收已完成（第 18 節）。使用者已核准本輪文件 commit／push，以及隔離故障候選 v1.5.1-rc.1 的 commit 與單一 RC tag 推送（第 19 節），不需重問。候選 200 項測試通過，README 第 8.6 節列現場步驟；本文件隨發布前提交記錄授權，最終發布狀態以 Git 及完成回覆核對，現場完整回滾仍待證據。正式機只驗略過 RC，斷電／程序中斷維持暫停。各舊節是當時紀錄。
+最新：兩機 v1.5.0 正常更新已驗收；測試機又完成故障 v1.5.1-rc.1 的完整 tag-only 回滾，恢復 v1.5.0、設定與健康正常，使用者確認真正失敗信收到、回滾後人工業務全數正常（第 20 節）。正式機實際查到並略過該 RC，仍為 v1.5.0；未對正式機本體注入故障。README 第 8.6 節含完整步驟與結果。兩個既有 tag 保留，測試機 failed／rollback=success 歷史保留；斷電／程序強制中斷維持暫停。各舊節是當時紀錄。
 
 ## 1. 使用者最新決定與本輪範圍
 
@@ -19,7 +19,7 @@
 1. 讀本文件、`AGENTS.md`、適用 skills；檢查 Git 與未提交變更，不重做已完成工作。
 2. **現場重試結果已收齊。** attempt `6e65daa0-9840-4a0e-816a-c625a3507f97`，phase=failed、rollback=not_needed；實際下載 671088640／943117577 bytes，未切換。使用者另回報 selected_build=v1.4.0、blocked=false、pending=0，last_health 快照核心／外部／相機全綠、PID 68818，並確認本次失敗郵件實際收到。這不是完整回退通過，也不是 AI 直接取得的即時健康。
 3. 若仍在更新，保留原作業；不要為改版中止它、重啟 poll 或重跑 retry。
-4. 已完成的正常更新見第 17～18 節，接續回滾候選與待放行範圍見第 19 節，不重做正常更新。發布前核對本輪 Git 授權、兩機仍是正常基準，依 README 第 8.6 節保存基準；故障 RC 不合併進正常分支、不晉升正式版。沒有遠端操作測試／正式機的工具，現場結果來自使用者貼回，不得聲稱 AI 代執行。
+4. 正常更新與完整回滾均已完成，見第 18～20 節；不重做發布、retry 或清除失敗紀錄。兩機保持 v1.5.0；測試機 --ota-check 因最近故障作業 failed 而 fail 是預期，回滾證據見 README 第 8.6 節。故障 RC 不晉升正式版；後續正常 rc.N 或其他演練依新指示，不自行恢復斷電／程序中斷測試。現場結果來自使用者貼回，AI 未直接連線操作。
 
 ## 3. 工作目錄與 Git 狀態（本輪重新核對）
 
@@ -287,3 +287,14 @@ caveman ponytail。
 - README 新第 8.6 節列發布前基準／私有備份、測試機實際切換與回滾、正式機略過、設定 JSON 還原比對、兩次即時健康與真人業務、真正失敗信及收尾。第 7.1 節正常命令已改為目前 v1.5.0，第 8 節測試命令補 tag_source；69 段 Bash 語法通過。
 - 成功須是本次新 RC／新 attempt 的 phase=failed、rollback=success、blocked=false，selected_build／health 恢復 v1.5.0 與原正式 SHA，config 還原、共享照片／特徵保留，實際業務與真正失敗信收件通過。rollback=not_needed 只代表切換前拒絕；最近作業 failed 時 --ota-check 會按設計 fail，不能刪歷史或偽造成功，改用第 8.6 節兩次唯讀 health／程序核對。
 - 候選 patch／計畫／測試證據位於 ignored 的 ota/dist/rollback-check-v1.5.1-rc.1/。使用者對具體的「文件 commit／push，以及故障候選 commit、只推送 v1.5.1-rc.1 tag」回覆「是」，已授權本輪 Git 操作與測試機短暫切換後回滾，不需再問同一放行。正常分支僅提交四份文件，隔離候選僅提交 main.py／RELEASE_NOTES 並推單一 RC tag；不合併故障碼至正常分支、不推故障正式 tag，不把授權擴張為其他版本。本節隨文件提交記錄發布前狀態；最終兩個 commit／tag 身分與推送成功以 Git 及完成回覆核對，現場回滾仍待使用者貼回結果。
+
+## 20. 2026-11-02 完整 tag-only 啟動失敗回滾驗收通過
+
+- 正常分支文件提交 1907ad56948c7abed7a1bb09452ebd843543e874 已推送；隔離故障提交 9f2cb4509c3c6afd9d18efb955be4f0e166a4544、annotated tag v1.5.1-rc.1 已推送並由遠端 tags API 核對一致。正常分支不含該故障碼，正式 v1.5.0 仍指向 e8da0fc6e0159d4ad97183a2c2c2ad5cdbf2c521，原十個遠端 tag 的 commit 身分保留，GitHub Releases 仍為 0。
+- 首次貼回的兩機 no_update 樣本尚未看到新 RC；測試機查詢早於本機 tag 建立 16 秒，不作故障回滾證據。後續新查詢真正選中／略過本次 RC，沒有為此重啟服務、retry 或清快取。
+- 測試機實際 attempt=dfdba473-bccd-4796-94be-d210cdd49c79，target=v1.5.1-rc.1、from=v1.5.0；failed_at／rollback_started_at=2026-11-02T02:18:57+08:00、rollback_completed_at=2026-11-02T02:20:04+08:00（Adelaide 04:48:57～04:50:04），phase=failed、rollback=success、blocked=false、pending=0。selected_build／health 恢復原正式 tag 與 commit，沒有把新版失敗寫成更新 success。
+- 現場應用日誌確認 Intentional startup failure for OTA rollback validation；使用者以該 attempt 的自動備份對照現行 config，回報 config_restored=True。回滾後 PID=141327／NRestarts=0、boot_id=1b485b2f-968d-4b2d-87e3-950ef97ac875 穩定；即時 health 的版本／commit／build ID 對應 v1.5.0，核心／MQTT／同步／兩路相機與執行緒正常，多項可讀 counters 比先前快照增加。curl 貼文在 detector:0 附近混入下一行終端輸出，僅記可讀欄位，不聲稱完整原始 JSON 解析通過。
+- 正式機 WS-1 於 2026-11-02T02:16:08+08:00 成功查 tags、rc_skipped 包含本次 RC（共 6 個）、action=no_update；保留 v1.5.0、原 app PID 475988／boot ID 及正常健康。這項驗收是 RC 隔離，正式機本體沒有故障更新或回滾。
+- 使用者針對本次 attempt 與「回滾後兩路影像、真人 IN／OUT、方向、語音、建檔照與特徵同步」的明確提問，回覆「失敗信已收到，人工業務全數正常」。因此本輪測試機完整 tag→來源準備→切換→預期啟動失敗→自動回滾→設定／健康／業務恢復→真正失敗信收件驗收通過；不是沿用 v1.4.1 下載失敗或本機 stage 替換演練結果。
+- 證據保存 ignored 的 ota/dist/rollback-check-v1.5.1-rc.1/，含 plan、publication、200 項本機測試、候選 patch、field-status 與 final-acceptance。README 第 8.6、RELEASE_NOTES、五條工作紀錄及本交接補最終結果，沿用已核准的本輪文件 commit／push 範圍提交正常分支；不建立新 tag、不更動兩機 app 或清失敗歷史。
+- 本輪結束時兩機皆保持 v1.5.0；測試機最近作業 failed／rollback=success 是刻意故障測試的正確紀錄，--ota-check 不會因人工驗收完成就自動改為 pass，不偽造 success 或反覆 retry。需要正常版本收尾時另按新指示準備 rc.N。斷電／程序強制中斷維持暫停；本次未測正式機本體回滾、回滾失敗或真實故障搭配 SMTP 中斷補寄。

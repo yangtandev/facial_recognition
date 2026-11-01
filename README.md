@@ -1343,9 +1343,9 @@ journalctl --user -u facial-ota-poll.service -u facial_recognition.service \
 
 <a id="tag-rollback-test"></a>
 
-### 8.6 Tag-only 啟動失敗回滾：本機候選準備與現場驗收步驟
+### 8.6 Tag-only 啟動失敗回滾：現場步驟與實測結果
 
-本節是待執行的現場回滾測試，不是已通過結果。兩機目前正常基準為 v1.5.0／commit e8da0fc6e0159d4ad97183a2c2c2ad5cdbf2c521。新故障候選規劃為 v1.5.1-rc.1，從該正常基底隔離準備，只在新版 main.py 頂端加入刻意拋錯；部署契約、模型、完整依賴、更新器及通知格式不變。它應能準備完成，切換後因無法啟動而觸發原更新器回滾；不再測舊的完整包下載。
+本輪現場驗收已通過：測試機收到故障 v1.5.1-rc.1，切換後啟動失敗並自動恢復 v1.5.0／commit e8da0fc6e0159d4ad97183a2c2c2ad5cdbf2c521，設定、健康、人工業務與真正失敗信均核對通過；正式機實際查到並略過該 RC。故障 tag 指向 9f2cb4509c3c6afd9d18efb955be4f0e166a4544，只改新版 main.py 入口及發布說明，部署契約、模型、完整依賴、更新器與通知格式不變。以下保留本次操作步驟，不重跑同一失敗版。
 
 候選工作目錄為開發機 ota/dist/e2e-rollback-v1.5.1-rc.1，檢查證據在 ota/dist/rollback-check-v1.5.1-rc.1。發布前須核對未使用的 tag、僅一台 test 主機及本次 commit／push／RC tag 放行；不將故障候選合併進正常開發分支、不移動正式 tag、不建立故障正式 tag 或 GitHub Release。現場不切換 repo／角色、不替換 stage，也不人工製造通知。
 
@@ -1416,6 +1416,15 @@ journalctl --user -u facial-ota-poll.service -u facial_recognition.service \
 
    最後實測兩路影像、真人 IN／OUT、方向、語音、建檔照與特徵同步；共享照片／特徵保留，不還原為測試前的舊資料。確認實際收到本次 attempt 的真正失敗郵件，含目標 RC、原／運行 v1.5.0 與 rollback=success；pending=0 不能單獨證明信箱收件。
 6. **判讀與收尾。** 同時具備原正式版恢復、設定還原、即時健康及人工業務正常、真正失敗郵件收到，才記「測試機完整回滾通過」。若 rollback_failed／blocked=true，保留證據並人工修復，不 resume 掩蓋問題。保留失敗 tag／attempt；同一失敗版會被略過，不反覆 retry。需要正常更新收尾時，另準備新的正常 rc.N、重新驗收，不能把故障 RC 晉升正式版。
+
+本輪實測證據（使用者現場回報）：
+
+- 測試機 attempt=dfdba473-bccd-4796-94be-d210cdd49c79，from=v1.5.0、target=v1.5.1-rc.1，phase=failed／rollback=success，恢復原正式 tag／commit，blocked=false、pending=0。
+- 日誌確認 Intentional startup failure for OTA rollback validation；以本次自動備份比對 config_restored=True。回滾後即時 health 的版本／commit 正確、核心／同步／兩路相機正常，PID=141327／NRestarts=0，boot ID 穩定、可讀工作計數持續增加。
+- 使用者確認「失敗信已收到，人工業務全數正常」：回滾後兩路影像、真人 IN／OUT、方向、語音、建檔照與特徵同步驗收通過。
+- 正式機 WS-1 成功查 tags，rc_skipped 包含 v1.5.1-rc.1、action=no_update，仍為 v1.5.0 與原 PID=475988；正式機本體未做故障注入或回滾。
+
+兩機目前均維持 v1.5.0。測試機保留本次 failed／rollback=success 歷史，--ota-check 因最近作業失敗而 fail 屬預期；依本節健康、設定、人工業務及通知證據確認回滾，不刪紀錄取得 pass。斷電、程序強制中斷及本次故障搭配 SMTP 中斷補寄仍未納入；舊郵件補寄實測範圍見第 8.4 節。
 
 ## 9. 已簡化與仍需人工處理的項目
 
