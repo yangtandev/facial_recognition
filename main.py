@@ -1,3 +1,6 @@
+# Intentional startup failure for the tag-only OTA rollback test.
+raise RuntimeError("Intentional startup failure for OTA rollback validation")
+
 import os
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
