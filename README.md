@@ -11,6 +11,7 @@
 - [多台主機共用設定](#fleet-profile)：匯出私有部署設定，省去逐台輸入帳密。
 - [本次 v1.5.0-rc.1 驗收指令](#ota-v150-rc1)、[一台測試機＋一台正式機的 OTA 測試步驟](#two-host-ota)：測試機收 RC／正式版，正式機只收正式版。
 - [正式機實測略過 v1.5.0-rc.1](#production-skip-v150-rc1)：查到 RC 仍保留原正式版本，通過後才安排正式版放行。
+- [本次 v1.5.0 正式版驗收](#ota-v150-stable)：測試機由 RC 更新；正式機從待命自動首次安裝。
 - [運作範例](#runtime-flow)、[發布更新](#release)、[故障處理](#operations)、[驗收方法](#acceptance)。
 - [主管工作紀錄](OTA_TEST_RECORD.md)：本輪實測流程、成功依據與尚未演練項目。
 
@@ -686,6 +687,44 @@ journalctl --user -u facial-ota-poll.service -u facial-ota-setup.service --since
 5. 保留兩次 status／PID 輸出與 15 秒驗收，記錄 RC 隔離技術驗收；原辨識業務持續正常仍由現場人工確認。若尚未查詢、查詢失敗、仍為舊 source 或 rc_skipped 沒有本次 RC，保留待驗；不改成 test、不強制安裝 RC、不推正式 tag 來替代這項測試。正式 tag 仍須另外取得放行。
 
 本輪現場結果（依使用者回報）：WS-1 待命接入成功，備份 attempt=7b3e2d47-0bd2-4b66-b577-b004155f379f，三服務 active／enabled，15 秒診斷 result=waiting_release。補設 GitHub token 後，last_poll.checked_at=2026-11-01T23:46:49+08:00、role=production、source=tags、query_ok=true、rc_skipped 包含 v1.5.0-rc.1（共略過 5 個 RC）、action=waiting_release；selected_build=null、pending=0、blocked=false。辨識 PID=2417／NRestarts=0 與接入前相同，健康快照核心／外部／兩路相機正常。因此本輪 RC 隔離技術驗收通過；不是已安裝 v1.4.0 或 v1.5.0，也不代替正式版更新後的業務驗收。journalctl 最近兩分鐘無紀錄，不否定較早已保存的成功查詢；正式版 tag 仍待放行。
+
+<a id="ota-v150-stable"></a>
+
+### 5.9 本次 v1.5.0：兩機正式版自動更新與驗收
+
+本節隨 v1.5.0 正式晉升準備；最終發布 tag／commit 以管理者提供的發布結果核對。使用者已確認測試機 RC 業務正常及正式機實際略過 RC，並指示開始正式版更新；不再推下一輪 RC。正式 tag 推送後兩機會自行更新，不需 git pull、重跑 setup 或重填 config。
+
+1. 發布前先核對正式機 WS-1 的專案、Python 與架構：本版部署契約適用 demosite／Python 3.12／x86_64。用 --preflight 盤點系統、磁碟、Git／Git LFS，另確認 python3.12 可匯入 venv／ensurepip；不能拿另一台歷史主機的環境當本機證據。角色保留 production，原 PID／NRestarts 以本次更新前輸出為基準。
+2. 正式 tag 推送後，兩機先看進度：
+
+   ```bash
+   cd "$HOME/facial_recognition"
+   bash install.sh --ota-status
+   journalctl --user -u facial-ota-poll.service -u facial-ota-setup.service \
+     --since "30 minutes ago" -n 80 --no-pager
+   ```
+
+   測試機從 v1.5.0-rc.1 更新；WS-1 從 waiting_release 自動派工首次安裝。preparing／switching／validating 或尚未完成 setup 時等待原作業，不 retry、不重啟 poll／setup。首次準備可能另建 Python 3.12 venv 並補下載鎖定 wheels；模型／環境只有驗證相同才重用，不保證正式機與測試機的下載量一致。
+3. 測試機 selected_build.version=v1.5.0、該次 app 作業 success 後，執行：
+
+   ```bash
+   cd "$HOME/facial_recognition"
+   bash install.sh --ota-status
+   bash install.sh --ota-check --expect-role test --expect-version v1.5.0 --seconds 15
+   systemctl --user show facial_recognition.service -p MainPID -p NRestarts
+   ```
+
+4. 正式機 selected_build.version=v1.5.0、enrollment_state=managed、setup.phase=complete、該次作業 success 後，執行：
+
+   ```bash
+   cd "$HOME/facial_recognition"
+   bash install.sh --ota-status
+   bash install.sh --ota-check --expect-role production --expect-version v1.5.0 --seconds 15
+   systemctl --user show facial_recognition.service -p MainPID -p NRestarts
+   ```
+
+5. 兩機分別核對 selected_build.commit 等於管理者提供的正式 tag 解析後完整 SHA、build_id=v1.5.0:該SHA、latest_update 目標為 v1.5.0 且 phase=success、blocked=false、即時診斷 pass、三服務 active／enabled，並保留 attempt_id／phase／rollback／pending。正式更新會切換 app，PID 可改變；更新完成後應穩定，無持續重啟。單看舊 RC pass、Git HEAD 或 pending=0 都不足以驗收正式版。
+6. 兩機各自實測兩路影像、真人 IN／OUT、方向、語音、建檔照及特徵同步，回報狀態與診斷結果。若首次準備／啟動失敗，保留輸出與歷史，核對原程式是否保留／復原及真實失敗郵件；不要強制安裝、清資料庫或自行 retry。成功更新不寄失敗信。
 
 <a id="release"></a>
 

@@ -2,7 +2,7 @@
 
 更新：2026-11-02，Australia/Adelaide。現場時間以輸出中的時區為準。這是接續工作的狀態摘要。
 
-最新：v1.5.0-rc.1 已發布至 commit 7893ac292f5d49b89faa8df17c1222b30ce5ccc0；測試機更新、15 秒健康、venv 重用及人工業務驗收通過。正式機最新回報為 WS-1，原來源 c831bbd、尚未納管版本；已接入 waiting_release，成功查 tags 並略過該 RC，PID 2417／NRestarts 0 不變。詳第 16 節及 README 第 5.7～5.8 節；先前各節是當時紀錄。正式 tag／正式 app 更新尚未放行或執行，故障啟動回退仍未完成。
+最新：測試機 v1.5.0-rc.1 更新、健康、venv 重用及人工業務驗收通過；正式機 WS-1 已接入 waiting_release，成功查 tags 並略過該 RC，PID 2417／NRestarts 0 不變。使用者指示「開始」，接續 v1.5.0 正式晉升（第 17 節）；此文件隨晉升提交準備，最終 tag／commit 及發布成功以 Git 與完成回覆核對。兩機正式版安裝仍待現場結果，故障啟動回退仍未完成。
 
 ## 1. 使用者最新決定與本輪範圍
 
@@ -19,7 +19,7 @@
 1. 讀本文件、`AGENTS.md`、適用 skills；檢查 Git 與未提交變更，不重做已完成工作。
 2. **現場重試結果已收齊。** attempt `6e65daa0-9840-4a0e-816a-c625a3507f97`，phase=failed、rollback=not_needed；實際下載 671088640／943117577 bytes，未切換。使用者另回報 selected_build=v1.4.0、blocked=false、pending=0，last_health 快照核心／外部／相機全綠、PID 68818，並確認本次失敗郵件實際收到。這不是完整回退通過，也不是 AI 直接取得的即時健康。
 3. 若仍在更新，保留原作業；不要為改版中止它、重啟 poll 或重跑 retry。
-4. 本機實作與驗證見第 11 節，最新兩機 RC 驗收見第 16 節，不重做已完成的工具維護或 RC 發布。下一步可準備同目標正式版；正式 tag 放行與正式機 app 安裝仍須相應授權。沒有遠端操作測試／正式機的工具，現場需使用者執行指令；不得聲稱代執行。
+4. 本機實作與驗證見第 11 節，兩機 RC 驗收見第 16 節，已獲使用者指示開始的正式晉升見第 17 節。不重做已完成的工具維護、RC 發布或重問本輪 v1.5.0 放行；先核對發布實況，再依 README 第 5.9 節驗收。沒有遠端操作測試／正式機的工具，現場需使用者執行指令；不得聲稱代執行。
 
 ## 3. 工作目錄與 Git 狀態（本輪重新核對）
 
@@ -256,3 +256,12 @@ caveman ponytail。
 - 結論：測試機會更新本輪 RC，正式機成功查到並略過 RC，角色隔離技術驗收通過。最終 journalctl 的兩分鐘視窗無紀錄，不否定較早已保存的查詢；WS-1 接入後人工業務未另回報，不把健康快照當真人辨識實測。
 - README 第 5.7 更新測試機實測結果，第 5.8 補齊 WS-1 唯讀盤點、只取工具、待命接入及 RC 略過判準，並將兩機 RC 驗收列為正式放行前置。使用者已要求本輪文件 commit／push，本節與 README、RELEASE_NOTES 的驗收說明一併提交；此授權不含新 tag 或正式 app 部署。ignored 現場證據保存在 ota/dist/candidate-v1.5.0-rc.1/，不納入提交。
 - 下一步可準備 v1.5.0 正式晉升的具體差異與測試機／正式機驗收步驟，保持已測 app 執行碼、模型、依賴與遷移一致；發布正式 tag 等於 production 放行，仍待使用者指示。故障 RC 真實啟動回退、實體斷電／程序中斷未由本輪正常更新或 RC 略過驗證。
+
+## 17. 2026-11-02 使用者指示開始 v1.5.0 正式晉升
+
+- 兩機又補回即時驗收：測試機仍為 v1.5.0-rc.1／commit 7893ac292f5d49b89faa8df17c1222b30ce5ccc0、PID 108632、15 秒 pass、warnings=[]；正式機 WS-1 的 15 秒診斷為 waiting_release、warnings=[]、PID 2417／NRestarts 0，last_poll.checked_at=2026-11-02T00:02:05+08:00、source=tags、query_ok=true、rc_skipped 包含該 RC。
+- 使用者在「下一步 v1.5.0 正式 tag 放行後，驗證兩機正式版更新」後回覆「開始」，已授權本輪 v1.5.0 正式晉升、必要的 metadata commit／push 及正式 tag 推送。已說明推正式 tag 將觸發正式機首次安裝、可能短暫切換辨識；不要再套用第 16 節當時的未授權狀態重問。
+- 已發布的文件提交 5b26331e666d669a6e3fc8243041eb6058de7c7a 僅改 README、交接及 RELEASE_NOTES。正式晉升仍只改這三份說明，對照已測 RC 核對所有執行碼、部署契約、模型與依賴物件相同；不從故障 v1.4.1-rc.1 取 app、不改動或重用舊 tag。
+- 正式版目標 v1.5.0，沿用已測 v1.5.0-rc.1 的相同目標；RELEASE_NOTES 首項為 v1.5.0，README 第 5.9 節列兩機精確驗收指令。本節記錄晉升提交準備，不能單靠本文件宣稱 tag 已推送或現場安裝成功。
+- WS-1 與歷史 Gini-MediaServer 的同機關係未確認；正式放行前另核對 WS-1 的 demosite／Python 3.12／x86_64 相容性，不套用另一台的歷史 Python 盤點。
+- 放行後測試機由 RC 更新至正式版；WS-1 從 waiting_release 自動首次安裝，成功才為 managed／setup complete。兩機核對 v1.5.0、正式 commit SHA／build ID、作業 success、即時健康與人工業務；準備期間不重跑 setup 或重啟 poll／app。正式更新後 PID 改變正常，不要求保留 legacy PID 2417。
