@@ -12,6 +12,7 @@
 - [本次 v1.5.0-rc.1 驗收指令](#ota-v150-rc1)、[一台測試機＋一台正式機的 OTA 測試步驟](#two-host-ota)：測試機收 RC／正式版，正式機只收正式版。
 - [正式機實測略過 v1.5.0-rc.1](#production-skip-v150-rc1)：查到 RC 仍保留原正式版本，通過後才安排正式版放行。
 - [本次 v1.5.0 正式版驗收](#ota-v150-stable)：測試機由 RC 更新；正式機從待命自動首次安裝。
+- [Tag-only 啟動失敗回滾驗收](#tag-rollback-test)：測試機實際回滾，正式機略過故障 RC；含回滾後檢查與通知判準。
 - [運作範例](#runtime-flow)、[發布更新](#release)、[故障處理](#operations)、[驗收方法](#acceptance)。
 - [主管工作紀錄](OTA_TEST_RECORD.md)：本輪實測流程、成功依據與尚未演練項目。
 
@@ -624,7 +625,7 @@ journalctl --user -u facial-ota-poll.service -u facial-ota-setup.service --since
    核對 selected_build.commit 是發布 tag 解析後的 SHA，build_id=v1.5.0-rc.1:該SHA、blocked=false、result=pass；RC 切換 app 後 PID 可以改變，之後應穩定。原專案 Git HEAD 不會因背景 OTA 跟著切到 RC，以選中 build 與即時 health 為準。
 4. 人工實測兩路影像、真人 IN／OUT、方向、語音、建檔照及特徵同步，再回報 --ota-status、--ota-check 與 preparation 結果。正常更新成功不寄失敗信；故障啟動回退仍另列待驗。
 
-正式機保持 production，接續下節實測略過這個 RC；尚未發布 v1.5.0 正式 tag。
+正式機保持 production，略過這個 RC 的實測結果見下節；後續 v1.5.0 正式版放行與驗收結果見第 5.9 節。
 
 <a id="production-skip-v150-rc1"></a>
 
@@ -686,13 +687,13 @@ journalctl --user -u facial-ota-poll.service -u facial-ota-setup.service --since
    通過須同時符合：last_poll.role=production、source=tags、query_ok=true、checked_at 為本次新查詢、rc_skipped 包含 v1.5.0-rc.1。WS-1 的 action 應為 waiting_release、selected_build=null、診斷 result=waiting_release，原服務 WorkingDirectory／MainPID／NRestarts 與盤點相同；已納管主機則為 action=no_update、原正式 version／commit 不變、診斷 pass。兩種狀態都須 blocked=false、三服務 active／enabled、原辨識與同步持續正常，且沒有目標為該 RC 的 app 更新作業。工具維護可新增 agent_upgrade 紀錄，待命接入可新增 waiting_release 紀錄；均不等於安裝新版 app。
 5. 保留兩次 status／PID 輸出與 15 秒驗收，記錄 RC 隔離技術驗收；原辨識業務持續正常仍由現場人工確認。若尚未查詢、查詢失敗、仍為舊 source 或 rc_skipped 沒有本次 RC，保留待驗；不改成 test、不強制安裝 RC、不推正式 tag 來替代這項測試。正式 tag 仍須另外取得放行。
 
-本輪現場結果（依使用者回報）：WS-1 待命接入成功，備份 attempt=7b3e2d47-0bd2-4b66-b577-b004155f379f，三服務 active／enabled，15 秒診斷 result=waiting_release。補設 GitHub token 後，last_poll.checked_at=2026-11-01T23:46:49+08:00、role=production、source=tags、query_ok=true、rc_skipped 包含 v1.5.0-rc.1（共略過 5 個 RC）、action=waiting_release；selected_build=null、pending=0、blocked=false。辨識 PID=2417／NRestarts=0 與接入前相同，健康快照核心／外部／兩路相機正常。因此本輪 RC 隔離技術驗收通過；不是已安裝 v1.4.0 或 v1.5.0，也不代替正式版更新後的業務驗收。journalctl 最近兩分鐘無紀錄，不否定較早已保存的成功查詢；正式版 tag 仍待放行。
+本輪 RC 現場結果（依使用者回報）：WS-1 待命接入成功，備份 attempt=7b3e2d47-0bd2-4b66-b577-b004155f379f，三服務 active／enabled，15 秒診斷 result=waiting_release。補設 GitHub token 後，last_poll.checked_at=2026-11-01T23:46:49+08:00、role=production、source=tags、query_ok=true、rc_skipped 包含 v1.5.0-rc.1（共略過 5 個 RC）、action=waiting_release；selected_build=null、pending=0、blocked=false。辨識 PID=2417／NRestarts=0 與接入前相同，健康快照核心／外部／兩路相機正常。因此本輪 RC 隔離技術驗收通過；此時尚未安裝 v1.4.0 或 v1.5.0，也不代替正式版更新後的業務驗收。journalctl 最近兩分鐘無紀錄，不否定較早已保存的成功查詢；後續正式版放行結果見第 5.9 節。
 
 <a id="ota-v150-stable"></a>
 
 ### 5.9 本次 v1.5.0：兩機正式版自動更新與驗收
 
-本節隨 v1.5.0 正式晉升準備；最終發布 tag／commit 以管理者提供的發布結果核對。使用者已確認測試機 RC 業務正常及正式機實際略過 RC，並指示開始正式版更新；不再推下一輪 RC。正式 tag 推送後兩機會自行更新，不需 git pull、重跑 setup 或重填 config。
+v1.5.0 正式 tag 已發布，指向 e8da0fc6e0159d4ad97183a2c2c2ad5cdbf2c521；兩機正式版安裝、15 秒健康及人工業務驗收均通過。以下保留本次操作步驟；正式 tag 推送後由兩機自行更新，不需 git pull、重跑 setup 或重填 config。
 
 1. 發布前先核對正式機 WS-1 的專案、Python 與架構：本版部署契約適用 demosite／Python 3.12／x86_64。用 --preflight 盤點系統、磁碟、Git／Git LFS，另確認 python3.12 可匯入 venv／ensurepip；不能拿另一台歷史主機的環境當本機證據。角色保留 production，原 PID／NRestarts 以本次更新前輸出為基準。
 2. 正式 tag 推送後，兩機先看進度：
@@ -725,6 +726,8 @@ journalctl --user -u facial-ota-poll.service -u facial-ota-setup.service --since
 
 5. 兩機分別核對 selected_build.commit 等於管理者提供的正式 tag 解析後完整 SHA、build_id=v1.5.0:該SHA、latest_update 目標為 v1.5.0 且 phase=success、blocked=false、即時診斷 pass、三服務 active／enabled，並保留 attempt_id／phase／rollback／pending。正式更新會切換 app，PID 可改變；更新完成後應穩定，無持續重啟。單看舊 RC pass、Git HEAD 或 pending=0 都不足以驗收正式版。
 6. 兩機各自實測兩路影像、真人 IN／OUT、方向、語音、建檔照及特徵同步，回報狀態與診斷結果。若首次準備／啟動失敗，保留輸出與歷史，核對原程式是否保留／復原及真實失敗郵件；不要強制安裝、清資料庫或自行 retry。成功更新不寄失敗信。
+
+本輪正式版現場結果（依使用者回報）：測試機由 v1.5.0-rc.1 更新成功，attempt=be1f9ac6-957c-4506-89c9-b13eb71c17de、PID=139697；正式機 WS-1 由 legacy 首次安裝成功，attempt=21b462c5-0961-4640-91d0-71e8cff928d6、managed／setup complete、PID=475988／NRestarts=0。兩機 version／commit／build ID 均對應上述正式 tag，phase=success、rollback=not_needed、pending=0、blocked=false，15 秒診斷 pass、三服務 active／enabled、warnings=[]。使用者另確認兩機人工業務檢查通過；本輪正常更新驗收完成，故障啟動回退及斷電／程序中斷仍屬另案。
 
 <a id="release"></a>
 
@@ -842,20 +845,20 @@ git diff --check
 
 取得含 ota/diagnostics.py 的新版工具後，在原專案以服務帳號執行；不需啟用 venv、不需 sudo。已發布的舊套件未必含這個新指令，不能只複製新版 install.sh 而漏掉 ota/。
 
-以下是本輪兩機已完成更新後的 15 秒驗收命令；後續請將 v1.4.0 換成實際目標。
+以下是本輪兩機已完成 v1.5.0 更新後的 15 秒驗收命令；後續請將 v1.5.0 換成實際目標。最近一次更新失敗後的回滾驗收另見第 8.6 節。
 
 正式機：
 
 ```bash
 cd "$HOME/facial_recognition"
-bash install.sh --ota-check --expect-role production --expect-version v1.4.0 --seconds 15
+bash install.sh --ota-check --expect-role production --expect-version v1.5.0 --seconds 15
 ```
 
 測試機（原專案工具已更新時）：
 
 ```bash
 cd "$HOME/facial_recognition"
-bash install.sh --ota-check --expect-role test --expect-version v1.4.0 --seconds 15
+bash install.sh --ota-check --expect-role test --expect-version v1.5.0 --seconds 15
 ```
 
 - 尚在 waiting_release 的正式機只用 `--ota-check --expect-role production`，不能指定尚未安裝的版本。不指定版本時核對目前選中套件，不表示它是 GitHub 最新發布版。
@@ -1172,7 +1175,7 @@ PY
 1. 開發機執行離線測試，不連真實 SMTP、不改本機 systemd：
 
    ```bash
-   venv/bin/python -m unittest ota.test_ota ota.test_setup ota.test_diagnostics -v
+   venv/bin/python -m unittest ota.test_ota ota.test_setup ota.test_diagnostics ota.test_tag_source -v
    ```
 
 2. 實機故障測試用隔離 repo／測試專案，不向正式 repo 發布故障套件。保存主機、前後版本／build ID、時間、回退及信件紀錄。
@@ -1337,6 +1340,82 @@ journalctl --user -u facial-ota-poll.service -u facial_recognition.service \
 上述第 3、4 步為改版前計畫；後續改按 tag-only 契約安排，不直接再發 Release。
 
 本次回退成功判準：latest_update.target_version 必須為 v1.4.1-rc.1、phase=failed、rollback=success、blocked=false，選中版本恢復 v1.4.0 且即時核心健康正常，並實際收到該次真實更新失敗通知；不能把第 8.3 節 target_version=v1.4.0 的舊演練紀錄當成本次結果。
+
+<a id="tag-rollback-test"></a>
+
+### 8.6 Tag-only 啟動失敗回滾：本機候選準備與現場驗收步驟
+
+本節是待執行的現場回滾測試，不是已通過結果。兩機目前正常基準為 v1.5.0／commit e8da0fc6e0159d4ad97183a2c2c2ad5cdbf2c521。新故障候選規劃為 v1.5.1-rc.1，從該正常基底隔離準備，只在新版 main.py 頂端加入刻意拋錯；部署契約、模型、完整依賴、更新器及通知格式不變。它應能準備完成，切換後因無法啟動而觸發原更新器回滾；不再測舊的完整包下載。
+
+候選工作目錄為開發機 ota/dist/e2e-rollback-v1.5.1-rc.1，檢查證據在 ota/dist/rollback-check-v1.5.1-rc.1。發布前須核對未使用的 tag、僅一台 test 主機及本次 commit／push／RC tag 放行；不將故障候選合併進正常開發分支、不移動正式 tag、不建立故障正式 tag 或 GitHub Release。現場不切換 repo／角色、不替換 stage，也不人工製造通知。
+
+| 主機 | 本輪操作 | 預期結果 |
+| --- | --- | --- |
+| test 測試機 | 自動接收故障 RC，實際切換、啟動失敗、回滾 | 恢復 v1.5.0，該 RC 作業 failed／rollback=success，健康與業務恢復，收到真正失敗信 |
+| production 正式機 | 保持原角色，實際查 tags 並略過該 RC | 持續 v1.5.0，原程序不因 RC 重啟；這不代表正式機本體已做故障回滾 |
+
+若要求正式機本體也實際回滾，需另定維護範圍與放行；不能把正式機改成 test，或為此發布會觸達現場的故障正式 tag。斷電、強制中斷程序及 SMTP 故障注入均不包含在本輪。
+
+1. **發布前：測試機核對正常基準並備份。** 使用原桌面帳號、確認沒有進行中的更新／接入，原辨識與 AnyDesk／SSH 正常：
+
+   ```bash
+   cd "$HOME/facial_recognition"
+   bash install.sh --ota-status
+   bash install.sh --ota-check --expect-role test --expect-version v1.5.0 --seconds 15
+   systemctl --user show facial_recognition.service -p MainPID -p NRestarts
+   ```
+
+   selected_build.commit 應為上述正式 SHA、blocked=false、診斷 pass。保存以下私有備份與目錄名稱；不輸出／上傳 config 或帳密。OTA 仍會在切換前另行備份當時的設定：
+
+   ```bash
+   FACIAL_OTA_ROLLBACK_BACKUP=$(mktemp -d "$HOME/facial-ota-rollback.XXXXXX") &&
+   cp -L --preserve=mode config.json "$FACIAL_OTA_ROLLBACK_BACKUP/config.json" &&
+   chmod 600 "$FACIAL_OTA_ROLLBACK_BACKUP/config.json" &&
+   bash install.sh --ota-status > "$FACIAL_OTA_ROLLBACK_BACKUP/before-status.json" &&
+   readlink -f "$HOME/.local/share/facial-ota/current" > "$FACIAL_OTA_ROLLBACK_BACKUP/before-current.txt" &&
+   printf '%s\n' "$FACIAL_OTA_ROLLBACK_BACKUP"
+   ```
+
+2. **開發端按本次授權發布單一故障 RC tag。** 該 commit 只包含故障入口與清楚標示用途的 RELEASE_NOTES；使用已驗證部署契約，讓常駐 agent 走 tags→固定來源→準備→切換→健康失敗→回滾。正式機另依第 4 步驗略過；故障候選不得晉升正式版。
+3. **測試機等待完整回滾，不干預作業。** 先查狀態與日誌；啟動失敗可能等待 startup_timeout（預設 180 秒），舊版復原還需 stable_seconds（預設 60 秒），另計準備時間：
+
+   ```bash
+   cd "$HOME/facial_recognition"
+   bash install.sh --ota-status
+   journalctl --user -u facial-ota-poll.service -u facial_recognition.service \
+     --since "30 minutes ago" -n 100 --no-pager
+   ```
+
+   必須看到該新 RC 的作業，而非沿用舊 v1.4.1-rc.1 失敗紀錄。preparing／switching／validating／rolling_back 時不重跑 setup、restart 或 retry。只有下載／準備失敗且 rollback=not_needed，不能算啟動失敗回滾通過。
+4. **正式機唯讀驗略過。** 發布前後各記錄一次原程序，等成功的新 tags 查詢：
+
+   ```bash
+   cd "$HOME/facial_recognition"
+   bash install.sh --ota-status
+   bash install.sh --ota-check --expect-role production --expect-version v1.5.0 --seconds 15
+   systemctl --user show facial_recognition.service -p MainPID -p NRestarts
+   ```
+
+   要求 source=tags、query_ok=true、checked_at 晚於發布、rc_skipped 包含本次故障 RC、action=no_update；仍為原正式 commit，PID／NRestarts 不因 RC 改變。不能把略過 RC 記成正式機回滾。
+5. **測試機回滾後核對真實結果。** 要求 latest_update.target_version=v1.5.1-rc.1、phase=failed、rollback=success，並有本次 attempt_id 及 failed_at／rollback_started_at／rollback_completed_at；selected_build 恢復 v1.5.0／原正式 SHA，blocked=false。latest_update 的 failed 表示新版更新失敗，rollback=success 才表示回滾成功。
+
+   最近作業為 failed 時，--ota-check 會依設計回報 fail，不能刪歷史或建立假成功紀錄來取得 pass。改用以下唯讀健康與程序檢查，隔 15 秒再執行一次；自訂 health_port 時替換 8765：
+
+   ```bash
+   bash install.sh --ota-status
+   curl --fail --silent --show-error --noproxy '*' http://127.0.0.1:8765/health
+   systemctl --user show facial_recognition.service -p MainPID -p NRestarts
+   readlink -f "$HOME/.local/share/facial-ota/current"
+   ```
+
+   兩次 health 的 version／commit／build_id 應為原正式版，PID 符合 systemctl、boot_id／PID 穩定、必要工作 counters 增加、core_ok／external_ok／update_ready 與必要 checks 全部正常。回滾會重啟 app，因此新 PID 可不同於測試前；回滾後需保持穩定。current 路徑應恢復 before-current.txt 的原路徑，再以 JSON 內容比對設定（沿用先前保存的備份變數；若終端已更換，先填回實際備份目錄）：
+
+   ```bash
+   python3 -c 'import json,sys; from pathlib import Path; print("config_restored:", json.loads(Path("config.json").read_text()) == json.loads(Path(sys.argv[1]).read_text()))' "$FACIAL_OTA_ROLLBACK_BACKUP/config.json"
+   ```
+
+   最後實測兩路影像、真人 IN／OUT、方向、語音、建檔照與特徵同步；共享照片／特徵保留，不還原為測試前的舊資料。確認實際收到本次 attempt 的真正失敗郵件，含目標 RC、原／運行 v1.5.0 與 rollback=success；pending=0 不能單獨證明信箱收件。
+6. **判讀與收尾。** 同時具備原正式版恢復、設定還原、即時健康及人工業務正常、真正失敗郵件收到，才記「測試機完整回滾通過」。若 rollback_failed／blocked=true，保留證據並人工修復，不 resume 掩蓋問題。保留失敗 tag／attempt；同一失敗版會被略過，不反覆 retry。需要正常更新收尾時，另準備新的正常 rc.N、重新驗收，不能把故障 RC 晉升正式版。
 
 ## 9. 已簡化與仍需人工處理的項目
 

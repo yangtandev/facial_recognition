@@ -2,7 +2,7 @@
 
 更新：2026-11-02，Australia/Adelaide。現場時間以輸出中的時區為準。這是接續工作的狀態摘要。
 
-最新：測試機 v1.5.0-rc.1 更新、健康、venv 重用及人工業務驗收通過；正式機 WS-1 已接入 waiting_release，成功查 tags 並略過該 RC，PID 2417／NRestarts 0 不變。使用者指示「開始」，接續 v1.5.0 正式晉升（第 17 節）；此文件隨晉升提交準備，最終 tag／commit 及發布成功以 Git 與完成回覆核對。兩機正式版安裝仍待現場結果，故障啟動回退仍未完成。
+最新：兩機 v1.5.0（e8da0fc6e0159d4ad97183a2c2c2ad5cdbf2c521）正常更新、健康及人工業務驗收已完成（第 18 節）。使用者已核准本輪文件 commit／push，以及隔離故障候選 v1.5.1-rc.1 的 commit 與單一 RC tag 推送（第 19 節），不需重問。候選 200 項測試通過，README 第 8.6 節列現場步驟；本文件隨發布前提交記錄授權，最終發布狀態以 Git 及完成回覆核對，現場完整回滾仍待證據。正式機只驗略過 RC，斷電／程序中斷維持暫停。各舊節是當時紀錄。
 
 ## 1. 使用者最新決定與本輪範圍
 
@@ -19,7 +19,7 @@
 1. 讀本文件、`AGENTS.md`、適用 skills；檢查 Git 與未提交變更，不重做已完成工作。
 2. **現場重試結果已收齊。** attempt `6e65daa0-9840-4a0e-816a-c625a3507f97`，phase=failed、rollback=not_needed；實際下載 671088640／943117577 bytes，未切換。使用者另回報 selected_build=v1.4.0、blocked=false、pending=0，last_health 快照核心／外部／相機全綠、PID 68818，並確認本次失敗郵件實際收到。這不是完整回退通過，也不是 AI 直接取得的即時健康。
 3. 若仍在更新，保留原作業；不要為改版中止它、重啟 poll 或重跑 retry。
-4. 本機實作與驗證見第 11 節，兩機 RC 驗收見第 16 節，已獲使用者指示開始的正式晉升見第 17 節。不重做已完成的工具維護、RC 發布或重問本輪 v1.5.0 放行；先核對發布實況，再依 README 第 5.9 節驗收。沒有遠端操作測試／正式機的工具，現場需使用者執行指令；不得聲稱代執行。
+4. 已完成的正常更新見第 17～18 節，接續回滾候選與待放行範圍見第 19 節，不重做正常更新。發布前核對本輪 Git 授權、兩機仍是正常基準，依 README 第 8.6 節保存基準；故障 RC 不合併進正常分支、不晉升正式版。沒有遠端操作測試／正式機的工具，現場結果來自使用者貼回，不得聲稱 AI 代執行。
 
 ## 3. 工作目錄與 Git 狀態（本輪重新核對）
 
@@ -265,3 +265,25 @@ caveman ponytail。
 - 正式版目標 v1.5.0，沿用已測 v1.5.0-rc.1 的相同目標；RELEASE_NOTES 首項為 v1.5.0，README 第 5.9 節列兩機精確驗收指令。本節記錄晉升提交準備，不能單靠本文件宣稱 tag 已推送或現場安裝成功。
 - WS-1 與歷史 Gini-MediaServer 的同機關係未確認；正式放行前另核對 WS-1 的 demosite／Python 3.12／x86_64 相容性，不套用另一台的歷史 Python 盤點。
 - 放行後測試機由 RC 更新至正式版；WS-1 從 waiting_release 自動首次安裝，成功才為 managed／setup complete。兩機核對 v1.5.0、正式 commit SHA／build ID、作業 success、即時健康與人工業務；準備期間不重跑 setup 或重啟 poll／app。正式更新後 PID 改變正常，不要求保留 legacy PID 2417。
+
+## 18. 2026-11-02 v1.5.0 兩機正常更新驗收完成
+
+- 正式提交 e8da0fc6e0159d4ad97183a2c2c2ad5cdbf2c521 已推送 develop-v1.0.0，annotated tag v1.5.0 已推送並由遠端 tags API 核對解析後 commit 一致；舊九個 tag 的 commit 身分保留，GitHub Releases 仍為 0。正式晉升僅改三份發布文件，91 個非文件 Git 物件與已測 RC 相同，8 模型／77 wheels／部署契約不變，63 段 README Bash 語法檢查通過。
+- WS-1 放行前已另取得相容性實證：Ubuntu 24.04.4 LTS、Python 3.12.3、x86_64、demosite，venv／ensurepip 匯入通過，Git／Git LFS 可用，盤點時可用磁碟 844.5 GiB；不是套用歷史 Gini-MediaServer 的資料。
+- 測試機 gini-aiface-NUC11TNKi5：由 v1.5.0-rc.1 更新至 v1.5.0，attempt=be1f9ac6-957c-4506-89c9-b13eb71c17de，phase=success、rollback=not_needed、managed，PID=139697。selected_build 與 health 的正式 commit／build ID 相符；15 秒 --ota-check（role=test／expect-version=v1.5.0）pass、三服務 active／enabled、camera_ok=true、warnings=[]。
+- 正式機 gini@WS-1：由 legacy 首次安裝 v1.5.0，attempt=21b462c5-0961-4640-91d0-71e8cff928d6，operation=enrollment、phase=success、rollback=not_needed、managed、setup complete；備份保存在同 attempt 的 enrollment 目錄。selected_build／health 對應正式 commit，PID=475988／NRestarts=0；15 秒 --ota-check（role=production／expect-version=v1.5.0）pass、三服務 active／enabled、camera_ok=true、warnings=[]。兩機 pending=0、blocked=false、cleanup_error=null。
+- 首次準備曾僅顯示 preparing，主 Python PID 475755、沒有 pip 子程序；現場 /proc fd 指向 SciPy .part，採樣時 11534336 bytes、修改時間距採樣約兩秒，證實正在下載。之後正式機自行完成，不曾要求中止／重啟該 setup 或 retry。不能把早期安靜日誌／舊 health 快照當卡死或即時健康；也不從等待時長推算精確下載速率或安裝耗時。
+- 使用者在要求「兩機兩路影像、真人 IN／OUT、方向、語音、建檔照與特徵同步」後，補回正式機 15 秒 pass 及「人工檢查通過」，本輪兩機正式版人工業務驗收完成。上述為使用者提供的現場證據，AI 未直接連線操作。
+- 本輪完成：test 收 RC、production 成功查到並略過 RC、正式 tag 放行後兩機收同一正式版、健康及人工驗收。測試機 RC 的 preparation.environment=reused 有實證；不擴張為已量測正式機零下載或正式版兩機皆重用 venv。完整故障 RC 啟動回退仍未通過，實體斷電／程序中斷演練維持暫停／待驗，不自行恢復。
+- ignored 證據在 ota/dist/promotion-v1.5.0/，包含發布、WS-1 preflight、兩機 status／diagnostics 與最終驗收。README 第 5.9、RELEASE_NOTES 及五條主管工作紀錄已補最終結果；這批驗收後文件修改尚未 commit／push，不移動正式 tag、不自動建立新版本。未追蹤的舊 OTA_AI_HANDOVER.md、config.json.lock 保留原狀。
+
+## 19. 2026-11-02 接續 tag-only 故障啟動回滾：候選已備妥，尚未發布
+
+- 使用者詢問兩機測試方式是否都已記載 README，並要求測試更新失敗的回滾機制，之後指示「繼續」。本輪先以 test 實際故障回滾、production 查到故障 RC 仍略過；不把後者當正式機本體已做故障回滾。若要求正式機本體故障，須另定維護範圍，不發布會觸達正式機的故障正式 tag。
+- 初次遠端 tags 查詢因自動核准審核額度限制未執行，屬審核失敗、不是不安全判定；使用者指示繼續後，同一唯讀查詢重試成功，確認最新 stable 仍為 v1.5.0，新 v1.5.1-rc.1 未使用。該工具限制已解除，不應在後續重複聲稱仍被擋。
+- 已建立 detached worktree：ota/dist/e2e-rollback-v1.5.1-rc.1，HEAD 為正常正式版 e8da0fc6e0159d4ad97183a2c2c2ad5cdbf2c521。只修改 main.py（最前面刻意拋 RuntimeError）與 RELEASE_NOTES（首項 v1.5.1-rc.1 並清楚標為故障測試、不得晉升）；不使用舊 v1.4.1 故障來源，不改模型、77 wheels、部署契約、更新器或通知格式。
+- 候選入口以本機 Python 執行，確實在 app 初始化前以預期 RuntimeError 退出；候選的 200 項離線測試全通過（55.620 秒），包含準備失敗保留原版、切換後失敗還原設定／共享照片保留、回滾失敗阻擋與通知持久化。這是本機測試，不能記為現場 tag 回滾已通過。
+- 初次 git diff 因 LFS filter 寫 Git 暫存受沙盒唯讀限制而中止，測試尚未開始；已經權限核准重跑同一驗證並成功。不能跳過 filter 驗證或將此當模型內容錯誤。
+- README 新第 8.6 節列發布前基準／私有備份、測試機實際切換與回滾、正式機略過、設定 JSON 還原比對、兩次即時健康與真人業務、真正失敗信及收尾。第 7.1 節正常命令已改為目前 v1.5.0，第 8 節測試命令補 tag_source；69 段 Bash 語法通過。
+- 成功須是本次新 RC／新 attempt 的 phase=failed、rollback=success、blocked=false，selected_build／health 恢復 v1.5.0 與原正式 SHA，config 還原、共享照片／特徵保留，實際業務與真正失敗信收件通過。rollback=not_needed 只代表切換前拒絕；最近作業 failed 時 --ota-check 會按設計 fail，不能刪歷史或偽造成功，改用第 8.6 節兩次唯讀 health／程序核對。
+- 候選 patch／計畫／測試證據位於 ignored 的 ota/dist/rollback-check-v1.5.1-rc.1/。使用者對具體的「文件 commit／push，以及故障候選 commit、只推送 v1.5.1-rc.1 tag」回覆「是」，已授權本輪 Git 操作與測試機短暫切換後回滾，不需再問同一放行。正常分支僅提交四份文件，隔離候選僅提交 main.py／RELEASE_NOTES 並推單一 RC tag；不合併故障碼至正常分支、不推故障正式 tag，不把授權擴張為其他版本。本節隨文件提交記錄發布前狀態；最終兩個 commit／tag 身分與推送成功以 Git 及完成回覆核對，現場回滾仍待使用者貼回結果。
