@@ -66,7 +66,7 @@ class Agent:
             validate_smtp(self.config.get("smtp"))
         self.service = "facial_recognition.service"
         self.port = int(self.config.get("health_port", 8765))
-        for name in ("startup_timeout", "stable_seconds", "poll_seconds", "alert_grace_seconds"):
+        for name in ("startup_timeout", "stable_seconds", "poll_seconds"):
             if name in self.config and (not math.isfinite(float(self.config[name])) or float(self.config[name]) <= 0):
                 raise ValueError("Timeouts/intervals must be positive")
         if not (self.shared / "config.json").is_file():
@@ -166,17 +166,21 @@ class Agent:
         if active(SERVICE):
             return
         waiting = self.waiting()
-        self.check_waiting()
+        if not waiting or self.config["role"] != "production":
+            raise ValueError("Owned production waiting enrollment required")
         identity = self.identity()
         if identity["project"] == "unknown":
             raise ValueError("Cannot determine project from the current site configuration")
         releases, summary = self.discover()
         baseline = waiting["version"] if waiting["version"] != "legacy" else "v0.0.0"
         retry = self.store.get("retry", "")
-        failed = self.store.failed() - {retry}
+        completed = self.store.completed() - {retry}
         if retry:
             releases = [release for release in releases if release.get("tag_name") == retry]
-        while candidate := select_release(releases, "production", "v0.0.0", failed):
+        while candidate := select_release(releases, "production", "v0.0.0"):
+            if candidate["tag_name"] in completed:
+                self.poll_record(summary, "waiting_release")
+                return
             if version_key(candidate["tag_name"]) < version_key(baseline):
                 releases.remove(candidate)
                 continue
@@ -188,6 +192,7 @@ class Agent:
                 if "*" not in manifest["projects"] and identity["project"] not in manifest["projects"]:
                     releases.remove(candidate)
                     continue
+                self.check_waiting()
                 self.poll_record(summary, "enrollment_requested", selected_version=candidate["tag_name"])
                 launch(self.shared, self.root / "agent.json", automatic=True, version=candidate["tag_name"])
                 if retry:
@@ -578,11 +583,15 @@ class Agent:
             _, info = self.current()
             releases, poll = self.discover()
             retry = self.store.get("retry", "")
-            failed = self.store.failed() - {retry}
+            completed = self.store.completed() - {retry}
             if retry:
                 releases = [value for value in releases if value.get("tag_name") == retry]
             identity = self.identity()
-            while candidate := select_release(releases, self.config["role"], info["version"], failed):
+            while candidate := select_release(releases, self.config["role"], info["version"]):
+                # A terminal result ends this cycle; do not fall back to older tags.
+                if candidate["tag_name"] in completed:
+                    self.poll_record(poll, "no_update")
+                    return
                 try:
                     manifest = self.manifest(candidate)
                 except (OSError, ValueError, KeyError, TypeError) as error:
@@ -613,39 +622,9 @@ class Agent:
         if self.config["role"] == "development":
             return
         with file_lock(self.root / "notify.lock", blocking=False):
-            try:
-                with file_lock(self.root / "update.lock", blocking=False):
-                    self.monitor()
-            except BlockingIOError:
-                # Intentional update downtime is not a separate service incident.
-                pass
+            # Health validation belongs to the update transaction, which records
+            # its terminal result once. Runtime outages must not reopen that OTA.
             mail_once(self.config, self.store)
-
-    def monitor(self):
-        if self.setup_pending() or self.store.unfinished() or self.store.get("blocked"):
-            return
-        failures = {}
-        try:
-            if self.waiting():
-                status = self.check_waiting()
-                info = {"version": self.waiting()["version"]}
-            else:
-                _, info = self.current()
-                status = self.check(info)
-            if status.get("core_ok") is not True:
-                failures["core"] = "Core health validation failed"
-            if status.get("camera_ok") is False:
-                offline = [camera for camera, ok in status.get("cameras", {}).items() if not ok]
-                failures["camera"] = "No recent frames: " + ",".join(offline)
-            if status.get("external_ok") is not True:
-                failures["mqtt"] = "MQTT connection/subscription or face synchronization unavailable"
-            summary = {"running_version": info["version"], "service_healthy": status.get("healthy") is True}
-        except Exception as error:
-            failures["core"] = error_summary(error)
-            status = {"healthy": False, "core_ok": False}
-            summary = {"running_version": "unknown", "service_healthy": False}
-        self.store.set("last_health", status)
-        self.store.monitor(failures, self.identity(), summary, float(self.config.get("alert_grace_seconds", 300)))
 
     def setup_pending(self):
         path = self.root / "setup.json"

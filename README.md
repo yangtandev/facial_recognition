@@ -432,7 +432,7 @@ journalctl --user -u facial-ota-poll.service -u facial-ota-setup.service --since
 
 ### 5.2 查到新版後
 
-1. 依角色、SemVer、專案、部署契約與失敗紀錄篩選 Git tags，保存 tag→commit 身分，拒絕移動過的 tag。
+1. 依角色、SemVer、專案、部署契約與成功／失敗紀錄篩選 Git tags；已處理版本自動跳過，保存 tag→commit 身分，拒絕移動過的 tag。
 2. 確認舊版核心及 MQTT／同步正常；新版健康訊號排除僅攝影機無影像的情況。
 3. 取得固定 Git commit；驗證後重用模型及完整依賴環境，否則另建 venv、只補缺少的鎖定 wheels；檢查模型與設定遷移，舊版繼續服務。
 4. 備份 config，停止辨識與 MQTT，切換並啟動新版。
@@ -459,9 +459,9 @@ journalctl --user -u facial-ota-poll.service -u facial-ota-setup.service --since
 
 - update_ready 代表可通過更新驗收；healthy 另包含相機有新影像。
 - 僅無影像無法判斷是網路、設備或相機程式問題，也不能宣稱端到端影像已驗證。
-- 持續相機離線預設 5 分鐘才寄「攝影機連線異常」，與「更新失敗」區分。
-- 核心服務、MQTT／同步持續異常也依寬限通知；短暫中斷不寄。
-- 同一持續異常只建立一次通知，恢復後再次異常才重建；更新／回退期間抑制額外警報。
+- 攝影機斷線不寄 OTA 警示；更新驗收期間的核心服務、MQTT／同步異常仍可導致更新失敗。
+- 同一版本一旦記錄 success、failed 或 rollback_failed，該次 OTA 即結束；重啟後仍保留紀錄，等待更高的新版本才重新驗收，不改選更舊的未處理版本。明確執行人工 retry 可重試失敗版本。
+- notify 只寄送已記錄的更新失敗與明確的通知測試，不持續檢查攝影機、MQTT 或核心服務。新版 agent 會停止補寄舊背景警示，保留歷史紀錄及真正更新失敗的補寄。
 - 驗收完成後的長期異常先依 systemd 重啟機制處理，不自動還原多日前版本／設定。
 
 ### 5.4 更新失敗、SMTP 也斷線
@@ -483,13 +483,12 @@ journalctl --user -u facial-ota-poll.service -u facial-ota-setup.service --since
 | --- | --- |
 | GitHub poll_seconds | 有 token 每輪 300 秒；無 token 最少 1200 秒 |
 | 隨機延遲 | 每輪另加 0～10 秒，另計操作耗時 |
-| 通知監看／寄送 | 每輪 15 秒，另加 0～10 秒與操作耗時 |
-| alert_grace_seconds 持續異常寬限 | 300 秒，自首次觀察異常起算 |
+| 待寄通知處理 | 每輪 15 秒，另加 0～10 秒與操作耗時 |
 | SMTP 失敗重試 | 遞增退避，最高約 5 分鐘，加隨機延遲 |
 
 - GitHub 限流時遵守延後查詢時間，主機不會在發布瞬間全部一起更新。
-- 更新／回退停機不新增額外服務警報；既有持續異常沿用原事件，確認恢復後才解除。
-- 新版 agent 每輪重讀設定，調整間隔與寬限後通常無需重啟；已開始的等待會先走完。需要立即重查時，先確認沒有作業進行，再依第 3.1 節只重啟 poll。
+- 更新／回退以本次更新結果通知，流程外的服務異常不另外產生 OTA 警報。
+- 新版 agent 每輪重讀設定，調整輪詢間隔後通常無需重啟；已開始的等待會先走完。舊設定中的 alert_grace_seconds 已不使用。需要立即重查時，先確認沒有作業進行，再依第 3.1 節只重啟 poll。
 - 服務啟動會先嘗試一輪；300／1200 秒是後續間隔，不是首輪必須等待的時間。`last_poll` 沒更新時另查日誌、執行中的作業及工具版本，不只等待或補 token。
 
 <a id="two-host-ota"></a>
@@ -728,6 +727,76 @@ v1.5.0 正式 tag 已發布，指向 e8da0fc6e0159d4ad97183a2c2c2ad5cdbf2c521；
 6. 兩機各自實測兩路影像、真人 IN／OUT、方向、語音、建檔照及特徵同步，回報狀態與診斷結果。若首次準備／啟動失敗，保留輸出與歷史，核對原程式是否保留／復原及真實失敗郵件；不要強制安裝、清資料庫或自行 retry。成功更新不寄失敗信。
 
 本輪正式版現場結果（依使用者回報）：測試機由 v1.5.0-rc.1 更新成功，attempt=be1f9ac6-957c-4506-89c9-b13eb71c17de、PID=139697；正式機 WS-1 由 legacy 首次安裝成功，attempt=21b462c5-0961-4640-91d0-71e8cff928d6、managed／setup complete、PID=475988／NRestarts=0。兩機 version／commit／build ID 均對應上述正式 tag，phase=success、rollback=not_needed、pending=0、blocked=false，15 秒診斷 pass、三服務 active／enabled、warnings=[]。使用者另確認兩機人工業務檢查通過；本輪正常更新驗收完成，故障啟動回退及斷電／程序中斷仍屬另案。
+
+<a id="ota-alert-verification"></a>
+
+### 5.10 v1.5.1-rc.2：結案後重複 OTA 警示修正驗收
+
+這次修改的是獨立 agent，僅收到 app RC／正式版不足以修正既有 notify。先在 test 驗收；通過並取得正式機工具維護放行後，production 可依相同方法維護已測 agent，app 保持原正式版，不安裝 RC。正式 v1.5.1 tag 另依第 6.3 節測試／放行。
+
+1. 以原服務帳號操作，先查 `bash install.sh --ota-status`，確認沒有進行中的更新／setup、blocked=false，且當下核心與 MQTT／同步正常。test 的 app RC 更新與 agent 維護是不同作業：先等 app 作業結束再維護；若作業失敗則保留紀錄與原服務，先排查，不自行 retry。
+2. **確認管理者已推送 v1.5.1-rc.2 後**，用固定 tag 在獨立暫存目錄取得工具，沿用原主機設定維護 agent：
+
+   ```bash
+   cd "$HOME/facial_recognition" &&
+   FACIAL_OTA_ALERT_TAG=v1.5.1-rc.2 &&
+   FACIAL_OTA_ALERT_TOOLS=$(mktemp -d "$HOME/facial-ota-alert-tools.XXXXXX") &&
+   git fetch origin tag "$FACIAL_OTA_ALERT_TAG" &&
+   git rev-parse "$FACIAL_OTA_ALERT_TAG^{commit}" &&
+   git archive --format=tar --output="$FACIAL_OTA_ALERT_TOOLS/tools.tar" "$FACIAL_OTA_ALERT_TAG" -- ota &&
+   tar -xf "$FACIAL_OTA_ALERT_TOOLS/tools.tar" -C "$FACIAL_OTA_ALERT_TOOLS" &&
+   cd "$FACIAL_OTA_ALERT_TOOLS" &&
+   python3 -m ota.setup --project "$HOME/facial_recognition" --config "$HOME/.local/share/facial-ota/agent.json"
+   ```
+
+   核對印出的 commit 與管理者提供的已發布 SHA 相同。此流程不切換原專案 Git 分支；沿用本機 UUID、角色、SMTP 與 state_dir。維護成功應為 setup.phase=complete、operation=agent_upgrade、phase=success；這不是 app 更新成功證據。自訂專案／agent 設定路徑者替換成自己的路徑。production 仍須保持 production。
+3. 核對**已安裝的獨立 runtime**確實含修正，再查狀態與即時健康：
+
+   ```bash
+   cd "$HOME/facial_recognition" &&
+   cmp <(git show v1.5.1-rc.2:ota/updater.py) "$HOME/.local/share/facial-ota/agent/ota/updater.py" &&
+   cmp <(git show v1.5.1-rc.2:ota/core.py) "$HOME/.local/share/facial-ota/agent/ota/core.py" &&
+   python3 -m ota.setup --status --project "$HOME/facial_recognition" --config "$HOME/.local/share/facial-ota/agent.json"
+   systemctl --user is-active facial_recognition.service facial-ota-poll.service facial-ota-notify.service
+   ```
+
+   cmp 不應顯示差異，三服務應 active。若 state_dir 自訂，cmp 的 runtime 路徑也須替換。test 的 selected_build 應為 v1.5.1-rc.2 且有對應的 app 更新成功紀錄；production 在正式 tag 放行前應仍為原正式版，last_poll 成功查詢後的 rc_skipped 包含本次 RC。`last_health` 是舊快照，不作即時驗收證據。
+
+   即時驗收在上一段建立的工具目錄執行；test 使用：
+
+   ```bash
+   cd "$FACIAL_OTA_ALERT_TOOLS" &&
+   python3 -m ota.diagnostics check --project "$HOME/facial_recognition" --config "$HOME/.local/share/facial-ota/agent.json" --expect-role test --expect-version v1.5.1-rc.2 --seconds 15
+   ```
+
+   production 改成 `--expect-role production`，`--expect-version` 使用當下預期正式版：僅維護 agent 時為 v1.5.0；日後正式更新完成才為 v1.5.1。正常連線時預期 pass；另實測辨識、方向、語音與建檔照／特徵同步。app 失敗歷史不得刪除或偽造成功。
+4. 在兩機分別執行以下**唯讀**查詢，保存結果，10 分鐘後再執行一次；這段期間不要發布其他更新。設定路徑自訂時修改第一個路徑：
+
+   ```bash
+   python3 - <<'PY'
+   import json
+   import sqlite3
+   from pathlib import Path
+
+   config = json.loads((Path.home() / ".local/share/facial-ota/agent.json").read_text())
+   root = Path(config["state_dir"]).expanduser().resolve()
+   with sqlite3.connect((root / "agent.sqlite3").as_uri() + "?mode=ro", uri=True) as db:
+       alerts = db.execute("""SELECT COUNT(*), COALESCE(SUM(delivered=0),0), COALESCE(MAX(seq),0)
+           FROM outbox WHERE json_extract(body,'$.kind')='alert'
+           AND json_extract(body,'$.alert') IN ('camera','mqtt','core')""").fetchone()
+       pending_failures = db.execute("""SELECT COUNT(*) FROM outbox WHERE delivered=0
+           AND json_extract(body,'$.kind')='update'
+           AND json_extract(body,'$.phase') IN ('failed','rollback_failed')""").fetchone()[0]
+       latest = db.execute("SELECT tag,phase FROM attempts ORDER BY updated DESC LIMIT 1").fetchone()
+   print(json.dumps({"role": config["role"], "runtime_alert_total": alerts[0],
+       "pending_runtime_alerts": alerts[1], "last_runtime_alert_seq": alerts[2],
+       "pending_update_failures": pending_failures, "latest_attempt": latest}, ensure_ascii=False, indent=2))
+   PY
+   ```
+
+   通過條件：pending_runtime_alerts=0，兩次 runtime_alert_total／last_runtime_alert_seq 相同，沒有因流程外的攝影機／MQTT 異常新增 OTA 作業或背景警示。歷史總數可大於零；保留舊事件不代表仍在誤報。pending_update_failures 可代表真正更新失敗待補寄，須核對原事件與 SMTP，不能清佇列來取得零。
+
+   test 若需重現，另安排在無 OTA 作業時只中斷測試機的攝影機來源或 MQTT 連線，跨過舊版 5 分鐘寬限再恢復；保留主機網路及遠端連線，不操作共用 broker 或正式機。production 只觀察自然運行。未重現斷線時，只能記「觀察期間無新增誤報」，不宣稱斷線情境已驗收。此項不重做斷電或強制程序中斷演練。
 
 <a id="release"></a>
 
@@ -1257,7 +1326,7 @@ PY
 4. **程序中斷恢復另測**：從乾淨基準開始，在另一輪更新的 `preparing` 或 `validating` 階段，只對 `facial-ota-poll.service` 的程序發送 SIGKILL；先確認該 unit 的 `Restart=on-failure`、`RestartSec=15` 與預設整個服務群組終止行為。等更新器自動重啟後，依上表確認保留／回退 A、資料完整。不要把一般 restart 當成突發中斷，也不要將此結果記為斷電恢復通過。
 5. **真正斷電另排**：需要現場人員協助開機，或獨立於作業系統的電源／管理介面；遠端智慧插座還需先確認 BIOS 支援且已設為復電自動開機。若目前沒有這些條件，無法保證重新連線，保留「實體斷電尚未演練」即可；軟體計時器無法在已斷電主機上開機。
 
-若只想先獨立測補寄，可在無進行中更新時，先排定並確認辨識服務的自動恢復工作，再只停止測試機的辨識服務；保留 notify 運行，等待超過 `alert_grace_seconds`（預設 300 秒，另加監看間隔）產生真正異常通知。確認 pending 後恢復辨識及 SMTP，再核對收件；這能測異常通知補寄，仍不能替代更新失敗回退演練。
+補寄驗收須使用上表的真實更新失敗事件；單獨停止辨識服務、攝影機斷線或流程外的 MQTT 異常都不會建立 OTA 通知，不能用來觸發補寄測試。
 
 ### 8.3 已完成：測試機本機故障副本回退
 

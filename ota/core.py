@@ -324,34 +324,18 @@ class Store:
 
     @staticmethod
     def is_notification(event):
-        return event.get("kind") == "alert" or (event.get("kind") == "update" and event.get("phase") in ("failed", "rollback_failed"))
-
-    def monitor(self, failures, identity, summary, grace):
-        """Persist incident state and its one notification in the same transaction."""
-        with self.connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT value FROM state WHERE key='incidents'").fetchone()
-            incidents = json.loads(row[0]) if row else {}
-            now = time.time()
-            for key in list(incidents):
-                if key not in failures:
-                    del incidents[key]
-            for key, reason in failures.items():
-                incident = incidents.setdefault(key, {"since": now, "notified": False})
-                if not incident["notified"] and now - incident["since"] >= grace:
-                    self._enqueue(db, {**identity, **summary, "event_id": str(uuid.uuid4()),
-                        "kind": "alert", "alert": key, "error": reason,
-                        "occurred_at": incident["since"], "failed_at": timestamp(incident["since"])})
-                    incident["notified"] = True
-            db.execute("INSERT OR REPLACE INTO state VALUES ('incidents',?)", (json.dumps(incidents),))
+        return ((event.get("kind") == "alert" and event.get("alert") == "test")
+                or (event.get("kind") == "update" and event.get("phase") in ("failed", "rollback_failed")))
 
     def migrate_notifications(self):
-        # Preserve legacy audit/failures, but stop treating routine phases as pending mail.
+        # Retain the audit, but retire legacy runtime alerts and routine phases.
+        # Actual OTA failures and explicit SMTP tests keep their delivery retries.
         with self.connect() as db:
             db.execute("""UPDATE outbox SET delivered=1 WHERE delivered=0
-                AND json_extract(body,'$.kind')!='alert'
-                AND NOT (json_extract(body,'$.kind')='update'
-                    AND json_extract(body,'$.phase') IN ('failed','rollback_failed'))""")
+                AND COALESCE(
+                    (json_extract(body,'$.kind')='alert' AND json_extract(body,'$.alert')='test')
+                    OR (json_extract(body,'$.kind')='update'
+                        AND json_extract(body,'$.phase') IN ('failed','rollback_failed')), 0)=0""")
 
     def recipients(self, event_id, addresses):
         with self.connect() as db:
@@ -389,6 +373,10 @@ class Store:
     def failed(self):
         with self.connect() as db:
             return {row[0] for row in db.execute("SELECT tag FROM attempts WHERE phase IN ('failed','rollback_failed')")}
+
+    def completed(self):
+        with self.connect() as db:
+            return {row[0] for row in db.execute("SELECT tag FROM attempts WHERE phase IN ('success','failed','rollback_failed')")}
 
     def latest_summary(self):
         with self.connect() as db:

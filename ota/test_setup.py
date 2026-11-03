@@ -217,13 +217,14 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(0, setup.agent.store.outstanding())
         self.assertTrue(self.running["facial_recognition.service"])
 
-    def test_waiting_monitor_does_not_report_absent_baseline_as_core_failure(self):
+    def test_waiting_notifier_does_not_monitor_original_service(self):
         setup = self.waiting()
-        setup.agent.notify_once()
-        self.assertEqual({}, setup.agent.store.get("incidents", {}))
-        with patch("ota.updater.health", side_effect=OSError("legacy endpoint absent")):
+        with patch("ota.updater.health", side_effect=OSError("legacy endpoint absent")) as health, \
+             patch.object(setup.agent, "check_waiting") as check:
             setup.agent.notify_once()
-        self.assertTrue(setup.agent.store.get("last_health")["legacy_process_only"])
+            setup.agent.notify_once()
+        health.assert_not_called()
+        check.assert_not_called()
         self.assertEqual({}, setup.agent.store.get("incidents", {}))
         self.assertEqual([], self.sent)
 
@@ -234,11 +235,31 @@ class SetupTests(unittest.TestCase):
                 "cameras": {"0": False}}):
             setup.agent.notify_once()
             setup.agent.once()
-        self.assertEqual({"camera"}, set(setup.agent.store.get("incidents")))
+        self.assertEqual({}, setup.agent.store.get("incidents", {}))
         self.assertEqual(0, setup.agent.store.outstanding())
         self.assertNotIn(("stop", "facial_recognition.service"), self.calls)
         setup.agent.notify_once()
-        self.assertEqual({}, setup.agent.store.get("incidents"))
+        self.assertEqual({}, setup.agent.store.get("incidents", {}))
+
+    def test_waiting_completed_versions_skip_health_until_new_version(self):
+        setup = self.waiting()
+        self.stable()
+        for phase in ("success", "failed", "rollback_failed"):
+            with self.subTest(phase=phase):
+                setup.agent.store.record("completed", phase, {"target_version": "v1.4.0"}, setup.agent.identity())
+                with patch.object(setup.agent, "releases", return_value=[{"tag_name": "v1.3.9"}, {"tag_name": "v1.4.0"}]), \
+                     patch.object(setup.agent, "check_waiting") as check, \
+                     patch.object(setup.agent, "manifest") as manifest:
+                    setup.agent.once()
+                    setup.agent.once()
+                check.assert_not_called()
+                manifest.assert_not_called()
+                self.assertEqual("waiting_release", setup.agent.store.get("last_poll")["action"])
+        with patch.object(setup.agent, "releases", return_value=[{"tag_name": "v1.4.1"}]), \
+             patch.object(setup.agent, "check_waiting") as check:
+            setup.agent.once()
+        check.assert_called_once()
+        self.assertEqual("v1.4.1", read_json(self.state / "setup.json")["requested_version"])
 
     def test_first_formal_release_is_dispatched_to_independent_worker_and_enrolled(self):
         setup = self.waiting()
@@ -523,7 +544,7 @@ class SetupTests(unittest.TestCase):
     def test_pending_setup_prevents_normal_polling_or_duplicate_incident(self):
         setup = self.start()
         setup.agent.once()
-        setup.agent.monitor()
+        setup.agent.notify_once()
         self.assertEqual({}, setup.agent.store.latest_summary())
         self.assertEqual({}, setup.agent.store.get("incidents", {}))
 

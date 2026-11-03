@@ -481,46 +481,89 @@ class IntegrationTests(unittest.TestCase):
         mail_once(self.config, Store(self.agent.store.path), sender=lambda cfg, event, recipient: sent.append(event))
         self.assertEqual(event["rollback_failed_at"], sent[0]["rollback_failed_at"])
 
-    def test_monitor_grace_dedup_recovery_and_restart(self):
-        self.agent.check = lambda info: {"healthy": False, "core_ok": True, "external_ok": True,
-                                         "camera_ok": False, "cameras": {"0": False}}
-        with patch("ota.core.time.time", return_value=100):
-            self.agent.monitor()
-        self.assertEqual(0, self.agent.store.outstanding())
-        with patch("ota.core.time.time", return_value=401):
-            self.agent.store = Store(self.agent.store.path)
-            self.agent.monitor()
-            self.agent.monitor()
-        self.assertEqual(1, self.agent.store.outstanding())
-        event = json.loads(self.agent.store.pending()[0]["body"])
-        self.assertEqual("camera", event["alert"])
-        self.agent.check = lambda info: {"healthy": True, "core_ok": True, "external_ok": True, "camera_ok": True}
-        self.agent.monitor()
-        self.assertEqual({}, self.agent.store.get("incidents"))
+    def test_notify_does_not_check_runtime_health_after_terminal_result_or_restart(self):
+        for phase in ("success", "failed", "rollback_failed"):
+            with self.subTest(phase=phase):
+                self.agent.store.record(phase, phase, {"target_version": "v1.0.1"}, self.identity)
+                agent = Agent(self.root / "agent.json")
+                with patch.object(agent, "check", side_effect=RuntimeError("network offline")) as check, \
+                     patch("ota.notifications.send_mail") as sender:
+                    agent.notify_once()
+                    agent.notify_once()
+                check.assert_not_called()
+                self.assertEqual(0 if phase == "success" else 1, sender.call_count)
+                self.assertEqual(0, agent.store.outstanding())
 
-    def test_monitor_does_not_alert_during_update_or_blocked_rollback(self):
-        self.agent.store.set("blocked", True)
-        self.agent.check = lambda info: (_ for _ in ()).throw(RuntimeError("offline"))
-        self.agent.monitor()
-        self.assertEqual({}, self.agent.store.get("incidents", {}))
-        self.agent.store.set("blocked", False)
-        with file_lock(self.agent.root / "update.lock"), patch("ota.notifications.send_mail"):
+    def test_notify_only_delivers_results_while_update_lock_is_held(self):
+        self.agent.store.record("bad", "failed", {"target_version": "v1.0.1"}, self.identity)
+        with file_lock(self.agent.root / "update.lock"), \
+             patch.object(self.agent, "check") as check, patch("ota.notifications.send_mail") as sender:
             self.agent.notify_once()
-        self.assertEqual({}, self.agent.store.get("incidents", {}))
+        check.assert_not_called()
+        sender.assert_called_once()
 
-    def test_camera_alert_is_not_duplicated_across_update_window(self):
-        self.agent.check = lambda info: {"healthy": False, "core_ok": True, "external_ok": True,
-                                         "camera_ok": False, "cameras": {"0": False}}
-        with patch("ota.core.time.time", return_value=100):
-            self.agent.monitor()
-        with patch("ota.core.time.time", return_value=401):
-            self.agent.monitor()
-        self.assertEqual(1, self.agent.store.outstanding())
-        with file_lock(self.agent.root / "update.lock"), patch("ota.notifications.send_mail"):
+    def test_old_runtime_alerts_are_retired_but_failure_and_test_mail_survive(self):
+        store = self.agent.store
+        events = []
+        for alert in ("camera", "mqtt", "core", "test"):
+            event = {**self.identity, "event_id": str(uuid.uuid4()), "kind": "alert",
+                     "alert": alert, "occurred_at": 100}
+            events.append(event)
+            with store.connect() as db:
+                # Bypass current enqueue policy to simulate an installed legacy agent.
+                db.execute("INSERT INTO outbox(id,body,due,tries) VALUES (?,?,?,?)",
+                           (event["event_id"], json.dumps(event), time.time() + 3600, 3))
+        store.record("bad", "failed", {"target_version": "v1.0.1"}, self.identity)
+        sent = []
+        for _ in range(2):
+            mail_once(self.config, Store(store.path), sender=lambda cfg, event, recipient: sent.append(event))
+        self.assertEqual(["failed"], [event["phase"] for event in sent])
+        self.assertEqual(1, store.outstanding())  # Explicit test mail is still deferred.
+        with store.connect() as db:
+            self.assertEqual(5, db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0])
+            for event in events[:-1]:
+                self.assertEqual(1, db.execute("SELECT delivered FROM outbox WHERE id=?", (event["event_id"],)).fetchone()[0])
+            db.execute("UPDATE outbox SET due=0")
+        mail_once(self.config, Store(store.path), sender=lambda cfg, event, recipient: sent.append(event))
+        self.assertEqual("test", sent[-1]["alert"])
+        self.assertEqual(0, store.outstanding())
+
+    def test_completed_versions_skip_validation_until_new_version_appears(self):
+        for phase in ("success", "failed", "rollback_failed"):
+            with self.subTest(phase=phase):
+                self.agent.store.record("completed", phase, {"target_version": "v1.0.2"}, self.identity)
+                agent = Agent(self.root / "agent.json")
+                agent.identity = lambda: self.identity
+                with patch.object(agent, "releases", return_value=[release("v1.0.0"), release("v1.0.1"), release("v1.0.2")]), \
+                     patch.object(agent, "manifest") as manifest, patch.object(agent, "check") as check, \
+                     patch.object(agent, "update") as update:
+                    agent.once()
+                    agent.once()
+                manifest.assert_not_called()
+                check.assert_not_called()
+                update.assert_not_called()
+                with patch.object(agent, "releases", return_value=[release("v1.0.1"), release("v1.0.2"), release("v1.0.3")]), \
+                     patch.object(agent, "manifest", return_value={"projects": ["project"]}) as manifest, \
+                     patch.object(agent, "update") as update:
+                    agent.once()
+                self.assertEqual("v1.0.3", manifest.call_args.args[0]["tag_name"])
+                self.assertEqual("v1.0.3", update.call_args.args[0]["tag_name"])
+
+    def test_mqtt_failure_during_update_validation_rolls_back_and_notifies_once(self):
+        def check(info):
+            return {"healthy": info == self.old_info, "update_ready": info == self.old_info,
+                    "core_ok": True, "external_ok": info == self.old_info, "boot_id": "boot"}
+        self.agent.check = check
+        self.agent.wait_healthy = lambda info: Agent.wait_healthy(self.agent, info) if info == self.new_info else {"update_ready": True}
+        with patch("ota.updater.systemctl"), patch("ota.updater.time.monotonic", side_effect=[0, 0, 2]):
+            self.agent.update(release("v1.0.1"), {"sha256": "0" * 64})
+        self.assertEqual(self.old, self.agent.current()[0])
+        self.assertEqual("failed", self.agent.store.latest_summary()["phase"])
+        self.assertEqual("success", self.agent.store.latest_summary()["rollback"])
+        with patch("ota.notifications.send_mail") as sender:
             self.agent.notify_once()
-        self.agent.monitor()
-        with self.agent.store.connect() as db:
-            self.assertEqual(1, db.execute("SELECT COUNT(*) FROM outbox WHERE json_extract(body,'$.kind')='alert'").fetchone()[0])
+            self.agent.notify_once()
+        sender.assert_called_once()
 
     def test_manual_retry_selects_only_requested_version(self):
         self.agent.store.record("old-failure", "failed", {"target_version": "v1.0.1"}, self.identity)

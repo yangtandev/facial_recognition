@@ -19,6 +19,5 @@
   "poll_seconds": 300,
   "startup_timeout": 180,
   "stable_seconds": 60,
-  "alert_grace_seconds": 300,
   "keep_releases": 2
 }
