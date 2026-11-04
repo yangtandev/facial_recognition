@@ -798,6 +798,48 @@ v1.5.0 正式 tag 已發布，指向 e8da0fc6e0159d4ad97183a2c2c2ad5cdbf2c521；
 
    test 若需重現，另安排在無 OTA 作業時只中斷測試機的攝影機來源或 MQTT 連線，跨過舊版 5 分鐘寬限再恢復；保留主機網路及遠端連線，不操作共用 broker 或正式機。production 只觀察自然運行。未重現斷線時，只能記「觀察期間無新增誤報」，不宣稱斷線情境已驗收。此項不重做斷電或強制程序中斷演練。
 
+<a id="ota-v151-stable"></a>
+
+### 5.11 v1.5.1：正式更新與 production agent 維護
+
+候選驗收已完成：測試機實際安裝 v1.5.1-rc.2（ca0de07）、更新獨立 agent，兩個修正檔案比對相同，15 秒即時驗收 pass、三服務 active／enabled、pending=0；維護後 3547 秒新增／待寄背景警示均為 0，使用者確認真人辨識、語音與建檔照／特徵同步正常。這是正常運行觀察，未新增斷線注入或斷電演練。
+
+WS-1 在更換失效的 OTA token 後，於 2026-11-04T17:13:01+08:00 實際完成 production 輪詢：query_ok=true、source=tags、rc_skipped 包含 v1.5.1-rc.2、action=no_update；仍運行 v1.5.0（e8da0fc）、pending=0、blocked=false，最近 app 作業仍為原正式版接入成功。先前程序快照 MainPID=475988、NRestarts=0；本段不把歷史 last_health 當成即時健康證據。
+
+v1.5.1 由上述正常 RC.2 晉升，僅更新發布與操作文件；不晉升故障演練 RC.1。正式 tag 推送後，兩機按既有角色自行更新，切換期間辨識會短暫停止。各機以原桌面服務帳號操作；以下使用預設路徑，自訂 state_dir／shared_dir 者替換成自己的路徑。
+
+1. **確認管理者已推送正式 tag 後**，等待原 poll 完成，或執行一輪正常更新並查狀態：
+
+   ```bash
+   cd "$HOME/.local/share/facial-ota/agent" &&
+   python3 -m ota.updater --config "$HOME/.local/share/facial-ota/agent.json" once &&
+   python3 -m ota.updater --config "$HOME/.local/share/facial-ota/agent.json" status
+   ```
+
+   BlockingIOError 表示已有作業持有更新鎖，等待原作業後單獨執行 status。預期 selected_build.version=v1.5.1、commit 等於管理者提供的正式 SHA，對應的 app 更新 target_version=v1.5.1、phase=success、blocked=false。若還在 preparing／validating 或出現 failed，先保留輸出並排查，不直接重啟更新器或執行下一步。
+2. **production 須維護獨立 agent**：上述 app 更新成功後，直接使用已安裝的正式版工具；先核對 current 的版號，再啟動維護：
+
+   ```bash
+   cd "$HOME/.local/share/facial-ota/current" &&
+   python3 -c 'import json; info=json.load(open("BUILD_INFO.json")); assert info["version"] == "v1.5.1", "尚未更新至 v1.5.1"; print(info["version"], info["commit"])' &&
+   python3 -m ota.setup --project "$HOME/facial_recognition" --config "$HOME/.local/share/facial-ota/agent.json"
+   ```
+
+   預期 OTA: complete v1.5.1，新增 operation=agent_upgrade 的 success 紀錄。工具維護有自己的備份／復原流程，沿用該機 UUID、production 角色與剛保存的 token。test 若已維護本次 RC.2 的相同 agent，可直接執行下一步比對及正式版健康驗收。
+3. 從 current 核對獨立 agent 的修正檔案並做正式版即時驗收：
+
+   ```bash
+   cd "$HOME/.local/share/facial-ota/current" &&
+   cmp ota/updater.py "$HOME/.local/share/facial-ota/agent/ota/updater.py" &&
+   cmp ota/core.py "$HOME/.local/share/facial-ota/agent/ota/core.py" &&
+   python3 -m ota.diagnostics check --project "$HOME/facial_recognition" --config "$HOME/.local/share/facial-ota/agent.json" --expect-role production --expect-version v1.5.1 --seconds 15
+   ```
+
+   test 改為 --expect-role test。cmp 成功時沒有輸出，診斷預期 result=pass、version=v1.5.1、正確 build ID、三服務 active／enabled、pending=0、warnings=[]。維護 agent 後 latest_update 可能為 agent_upgrade，須同時核對其前面已有 v1.5.1 的 app 更新成功紀錄。
+4. 各機依第 5.10 節步驟 4 的唯讀查詢，跨過十分鐘確認背景警示總數／序號沒有增加、pending_runtime_alerts=0；歷史事件可保留，真正失敗待補寄須另核對。再確認兩路影像、真人辨識、方向、語音與建檔照／特徵同步，回報正式版安裝、agent 維護、觀察與人工業務結果。
+
+本段記錄已完成的候選驗收與正式機 RC 隔離，並提供正式版操作流程；v1.5.1 的現場安裝與 agent 維護結果尚未回報，不以發布成功代替現場驗收。
+
 <a id="release"></a>
 
 ## 6. 發布更新
